@@ -573,7 +573,7 @@
   vars:
     requested_quartus_force_reinstall: "{{ quartus_force_reinstall | default(false) | bool }}"
     requested_unmount_after_install: "{{ unmount_after_install | default(true) | bool }}"
-    arrow_udev_rules_path: /etc/udev/rules.d/51-arrow_usb_blaster.rules
+    usb_blaster_udev_rules_path: /etc/udev/rules.d/51-usb-blaster.rules
 
   tasks:
     - name: Wait for SSH
@@ -730,24 +730,33 @@
         remote_src: true
         mode: '0644'
 
-    - name: Install Arrow USB udev rule
+    - name: Install USB-Blaster udev rules
       copy:
-        dest: "{{ arrow_udev_rules_path }}"
+        dest: "{{ usb_blaster_udev_rules_path }}"
         mode: '0644'
         content: |
-          # Arrow-USB-Programmer
-          SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="6010", MODE="0666", NAME="bus/usb/$env{BUSNUM}/$env{DEVNUM}", RUN+="/bin/chmod 0666 %c"
-          SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTR{interface}=="Arrow USB Blaster*", ATTR{bInterfaceNumber}=="00", RUN="/bin/sh -c 'echo $kernel > /sys/bus/usb/drivers/ftdi_sio/unbind'"
-      register: arrow_udev_rule
+          # USB-Blaster
+          SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6001", MODE="0666", GROUP="plugdev"
+          SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6002", MODE="0666", GROUP="plugdev"
+          SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6003", MODE="0666", GROUP="plugdev"
+
+          # USB-Blaster II
+          SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6010", MODE="0666", GROUP="plugdev"
+          SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6810", MODE="0666", GROUP="plugdev"
+      register: usb_blaster_udev_rule
 
     - name: Reload udev rules if rule file changed
       shell: |
         set -euo pipefail
         udevadm control --reload-rules
-        udevadm trigger --attr-match=idVendor=0403 --attr-match=idProduct=6010 || true
+        udevadm trigger --attr-match=idVendor=09fb --attr-match=idProduct=6001 || true
+        udevadm trigger --attr-match=idVendor=09fb --attr-match=idProduct=6002 || true
+        udevadm trigger --attr-match=idVendor=09fb --attr-match=idProduct=6003 || true
+        udevadm trigger --attr-match=idVendor=09fb --attr-match=idProduct=6010 || true
+        udevadm trigger --attr-match=idVendor=09fb --attr-match=idProduct=6810 || true
       args:
         executable: /bin/bash
-      when: arrow_udev_rule is changed
+      when: usb_blaster_udev_rule is changed
       changed_when: true
 
     - name: Display installation summary
@@ -757,7 +766,7 @@
           Quartus linux64 dir: {{ quartus_linux64_dir.stdout }}
           Arrow USB library installed: {{ quartus_linux64_dir.stdout }}/libjtag_hw_arrow.so
           Arrow USB config installed: /etc/arrow_usb_blaster.conf
-          Udev rule installed: {{ arrow_udev_rules_path }}
+          USB-Blaster udev rules installed: {{ usb_blaster_udev_rules_path }}
 
     - name: Unmount Quartus installer share
       shell: |
