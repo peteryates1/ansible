@@ -1,0 +1,51 @@
+# Git Server VM defaults
+vm_type: "git"
+vm_memory: 4096
+vm_vcpus: 2
+
+extra_users:
+  - name: claude
+    sudo: true
+    shell: /bin/bash
+    ssh_keys: true
+  - name: git
+    sudo: false
+    shell: /usr/bin/git-shell
+    ssh_keys: false  # Keys added via runcmd to copy from peter
+
+extra_packages: []
+
+extra_runcmd:
+  # Create git repository directory
+  - mkdir -p /srv/git
+  - chown git:git /srv/git
+  - chmod 755 /srv/git
+  # Setup SSH for git user (copy keys from peter)
+  - mkdir -p /home/git/.ssh
+  - cp /home/peter/.ssh/authorized_keys /home/git/.ssh/authorized_keys
+  - chown -R git:git /home/git/.ssh
+  - chmod 700 /home/git/.ssh
+  - chmod 600 /home/git/.ssh/authorized_keys
+  # Add git-shell to allowed shells
+  - grep -q git-shell /etc/shells || echo /usr/bin/git-shell >> /etc/shells
+  # Create helper script for creating repos
+  - |
+    cat > /usr/local/bin/git-create-repo << 'GITSCRIPT'
+    #!/bin/bash
+    if [ -z "$1" ]; then
+      echo "Usage: git-create-repo <repo-name>"
+      echo "Creates a bare git repository in /srv/git/<repo-name>.git"
+      exit 1
+    fi
+    REPO="/srv/git/$1.git"
+    if [ -d "$REPO" ]; then
+      echo "Repository already exists: $REPO"
+      exit 1
+    fi
+    sudo git init --bare "$REPO"
+    sudo chown -R git:git "$REPO"
+    echo "Created repository: $REPO"
+    echo "Clone with: git clone git@<server-ip>:/srv/git/$1.git"
+    GITSCRIPT
+  - chmod +x /usr/local/bin/git-create-repo
+  - echo "Git server setup complete" >> /var/log/cloud-init-output.log

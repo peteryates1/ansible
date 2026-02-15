@@ -1,0 +1,34 @@
+#cloud-config
+# Minimal cloud-init for instances created from templates
+# Only sets hostname and injects SSH keys - packages/hardening already in template
+
+hostname: {{ vm_name }}
+manage_etc_hosts: true
+preserve_hostname: false
+
+users:
+  - name: peter
+    lock_passwd: true
+    ssh_authorized_keys:
+{% for key in ssh_authorized_keys %}
+      - {{ key }}
+{% endfor %}
+{% for user in extra_users %}
+{% if user.ssh_keys | default(true) %}
+  - name: {{ user.name }}
+    lock_passwd: true
+    ssh_authorized_keys:
+{% for key in ssh_authorized_keys %}
+      - {{ key }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+# Regenerate SSH host keys (removed by virt-sysprep)
+ssh_deletekeys: true
+ssh_genkeytypes: ['ed25519', 'rsa']
+
+# No packages - already in template
+# No runcmd - already in template
+
+final_message: "Instance {{ vm_name }} is ready!"

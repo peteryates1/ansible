@@ -1,0 +1,32 @@
+---
+# List all VMs
+# Usage:
+#   ansible-playbook playbooks/list.yml
+
+- name: List VMs
+  hosts: localhost
+  become: true
+
+  vars:
+    base_image_dir: /var/lib/libvirt/images
+
+  tasks:
+    - name: Get all VMs
+      command: virsh list --all
+      register: vm_list
+      changed_when: false
+
+    - name: Display VMs
+      debug:
+        msg: "{{ vm_list.stdout_lines }}"
+
+    - name: Find VM directories
+      find:
+        paths: "{{ base_image_dir }}"
+        patterns: "*"
+        file_type: directory
+      register: vm_dirs
+
+    - name: Display VM directories
+      debug:
+        msg: "VM directories: {{ vm_dirs.files | map(attribute='path') | list }}"

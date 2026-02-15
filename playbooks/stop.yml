@@ -1,0 +1,28 @@
+---
+# Stop a VM (graceful shutdown)
+# Usage:
+#   ansible-playbook playbooks/stop.yml -e vm_name=claude01
+
+- name: Stop VM
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name }}"
+
+  tasks:
+    - name: Check vm_name is provided
+      fail:
+        msg: "vm_name is required. Usage: ansible-playbook stop.yml -e vm_name=<name>"
+      when: vm_name is not defined or vm_name == ""
+
+    - name: Shutdown VM (graceful)
+      command: virsh shutdown {{ vm_name }}
+      register: stop_result
+      ignore_errors: true
+
+    - name: VM shutdown initiated
+      debug:
+        msg: |
+          Graceful shutdown initiated for {{ vm_name }}
+          Use 'virsh destroy {{ vm_name }}' for forced shutdown if needed.

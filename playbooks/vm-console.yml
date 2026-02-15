@@ -1,0 +1,35 @@
+---
+# Run commands in VM via console
+- name: VM Console Commands
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name | default('') }}"
+
+  tasks:
+    - name: Check VM name
+      fail:
+        msg: "Usage: ansible-playbook playbooks/vm-console.yml -e vm_name=<name>"
+      when: vm_name == ''
+
+    - name: Run ip link show via console
+      shell: |
+        virsh console {{ vm_name }} --force <<'EOF' || true
+
+        root
+        ip link show
+        ip addr show
+        exit
+        EOF
+      args:
+        executable: /bin/bash
+      register: console_output
+      changed_when: false
+      timeout: 10
+      ignore_errors: true
+
+    - name: Display output
+      debug:
+        msg: "{{ console_output.stdout_lines }}"
+      when: console_output.stdout_lines is defined

@@ -1,0 +1,33 @@
+---
+# Check cloud-init ISO contents
+- name: Check cloud-init ISO
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name | default('claude01') }}"
+    base_image_dir: /var/lib/libvirt/images
+
+  tasks:
+    - name: List ISO contents
+      shell: isoinfo -l -i {{ base_image_dir }}/{{ vm_name }}/cloud-init.iso
+      register: iso_contents
+      changed_when: false
+
+    - name: Display ISO contents
+      debug:
+        msg: "{{ iso_contents.stdout_lines }}"
+
+    - name: Extract network-config from ISO
+      shell: isoinfo -i {{ base_image_dir }}/{{ vm_name }}/cloud-init.iso -x /NETWORK-CONFIG. > /tmp/network-config.txt 2>&1 || true
+      changed_when: false
+
+    - name: Display network-config
+      shell: cat /tmp/network-config.txt
+      register: netconfig
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show network-config
+      debug:
+        msg: "{{ netconfig.stdout_lines }}"

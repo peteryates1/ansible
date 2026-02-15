@@ -1,0 +1,48 @@
+---
+# Get VM IP using multiple methods
+- name: Get VM IP
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name | default('') }}"
+
+  tasks:
+    - name: Check VM name
+      fail:
+        msg: "Usage: ansible-playbook playbooks/get-vm-ip.yml -e vm_name=<name>"
+      when: vm_name == ''
+
+    - name: Get VM MAC address
+      shell: virsh domiflist {{ vm_name }} | awk '/vnet/ {print $5}'
+      register: vm_mac
+      changed_when: false
+
+    - name: Display MAC
+      debug:
+        msg: "VM {{ vm_name }} MAC: {{ vm_mac.stdout }}"
+
+    - name: Get all DHCP leases
+      command: virsh net-dhcp-leases default
+      register: dhcp_leases
+      changed_when: false
+
+    - name: Display all leases
+      debug:
+        msg: "{{ dhcp_leases.stdout_lines }}"
+
+    - name: Find VM IP from DHCP leases by MAC
+      shell: virsh net-dhcp-leases default | grep -i "{{ vm_mac.stdout }}" | awk '{print $5}' | cut -d'/' -f1
+      register: vm_ip_from_dhcp
+      changed_when: false
+      when: vm_mac.stdout != ""
+
+    - name: Display VM IP
+      debug:
+        msg: "VM {{ vm_name }} IP: {{ vm_ip_from_dhcp.stdout }}"
+      when: vm_ip_from_dhcp.stdout is defined and vm_ip_from_dhcp.stdout != ""
+
+    - name: No IP found
+      debug:
+        msg: "No IP found for {{ vm_name }}"
+      when: vm_ip_from_dhcp.stdout is not defined or vm_ip_from_dhcp.stdout == ""

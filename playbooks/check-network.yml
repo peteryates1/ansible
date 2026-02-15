@@ -1,0 +1,46 @@
+---
+# Check libvirt network configuration
+- name: Check Network
+  hosts: localhost
+  become: true
+
+  tasks:
+    - name: Get default network info
+      command: virsh net-info default
+      register: net_info
+      changed_when: false
+
+    - name: Display network info
+      debug:
+        msg: "{{ net_info.stdout_lines }}"
+
+    - name: Get default network config
+      command: virsh net-dumpxml default
+      register: net_xml
+      changed_when: false
+
+    - name: Display network XML
+      debug:
+        msg: "{{ net_xml.stdout_lines }}"
+
+    - name: Check if dnsmasq is running
+      shell: ps aux | grep dnsmasq | grep -v grep
+      register: dnsmasq_proc
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display dnsmasq processes
+      debug:
+        msg: "{{ dnsmasq_proc.stdout_lines }}"
+      when: dnsmasq_proc.rc == 0
+
+    - name: Check default network bridge
+      command: ip addr show virbr0
+      register: virbr0
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display virbr0
+      debug:
+        msg: "{{ virbr0.stdout_lines }}"
+      when: virbr0.rc == 0

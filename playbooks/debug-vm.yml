@@ -1,0 +1,69 @@
+---
+# Debug VM networking
+# Usage: ansible-playbook playbooks/debug-vm.yml -e vm_name=claude01
+
+- name: Debug VM
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name | default('') }}"
+    base_image_dir: /var/lib/libvirt/images
+
+  tasks:
+    - name: Check VM name provided
+      fail:
+        msg: "Usage: ansible-playbook playbooks/debug-vm.yml -e vm_name=<name>"
+      when: vm_name == ''
+
+    - name: Check VM status
+      command: virsh domstate {{ vm_name }}
+      register: vm_state
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display VM state
+      debug:
+        msg: "VM {{ vm_name }} state: {{ vm_state.stdout }}"
+
+    - name: Get VM network interfaces
+      command: virsh domifaddr {{ vm_name }} --source agent
+      register: vm_net_agent
+      changed_when: false
+      ignore_errors: true
+
+    - name: Get VM network from DHCP
+      command: virsh domifaddr {{ vm_name }} --source lease
+      register: vm_net_lease
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display network info (agent)
+      debug:
+        msg: "{{ vm_net_agent.stdout_lines }}"
+      when: vm_net_agent.rc == 0
+
+    - name: Display network info (lease)
+      debug:
+        msg: "{{ vm_net_lease.stdout_lines }}"
+      when: vm_net_lease.rc == 0
+
+    - name: Get DHCP leases
+      command: virsh net-dhcp-leases default
+      register: dhcp_leases
+      changed_when: false
+
+    - name: Display DHCP leases
+      debug:
+        msg: "{{ dhcp_leases.stdout_lines }}"
+
+    - name: Check console log (last 30 lines)
+      shell: tail -30 {{ base_image_dir }}/{{ vm_name }}/console.log
+      register: console_log
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display console log
+      debug:
+        msg: "{{ console_log.stdout_lines }}"
+      when: console_log.rc == 0

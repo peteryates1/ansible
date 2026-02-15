@@ -1,0 +1,70 @@
+---
+# List host USB devices with IDs and descriptor names.
+# Usage:
+#   ansible-playbook playbooks/usb-list.yml
+
+- name: List Host USB Devices
+  hosts: localhost
+  become: true
+
+  tasks:
+    - name: List USB devices with manufacturer and product
+      shell: |
+        set -euo pipefail
+
+        if ! command -v lsusb >/dev/null 2>&1; then
+          echo "lsusb command not found. Install usbutils on host."
+          exit 1
+        fi
+
+        printf "%-7s %-9s %-11s %-30s %s\n" "Bus" "Device" "ID" "Manufacturer" "Product"
+        printf "%-7s %-9s %-11s %-30s %s\n" "-----" "------" "----------" "------------------------------" "------------------------------"
+
+        pair_file="$(mktemp)"
+        cleanup() {
+          rm -f "$pair_file"
+        }
+        trap cleanup EXIT
+
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+
+          bus="$(echo "$line" | awk '{print $2}')"
+          dev="$(echo "$line" | awk '{gsub(":", "", $4); print $4}')"
+          id="$(echo "$line" | awk '{print $6}')"
+          dev_path="/dev/bus/usb/${bus}/${dev}"
+
+          manufacturer=""
+          product=""
+          if [ -e "$dev_path" ]; then
+            desc="$(lsusb -D "$dev_path" -v 2>/dev/null || true)"
+            manufacturer="$(printf '%s\n' "$desc" | awk '/^[[:space:]]*iManufacturer[[:space:]]+[0-9]+/ && !found { $1=""; $2=""; sub(/^[[:space:]]+/, ""); print; found=1 }')"
+            product="$(printf '%s\n' "$desc" | awk '/^[[:space:]]*iProduct[[:space:]]+[0-9]+/ && !found { $1=""; $2=""; sub(/^[[:space:]]+/, ""); print; found=1 }')"
+          fi
+
+          [ -n "$manufacturer" ] || manufacturer="-"
+          [ -n "$product" ] || product="-"
+          printf "%-7s %-9s %-11s %-30s %s\n" "$bus" "$dev" "$id" "$manufacturer" "$product"
+
+          usb_name="$product"
+          if [ "$usb_name" = "-" ]; then
+            usb_name="$manufacturer"
+          fi
+          if [ "$usb_name" = "-" ]; then
+            usb_name="USB Device"
+          fi
+          usb_name_sanitized="$(printf '%s' "$usb_name" | tr '"' "'")"
+          printf '%s "%s"\n' "$id" "$usb_name_sanitized" >> "$pair_file"
+        done < <(lsusb)
+
+        echo ""
+        echo "Copy/paste USB args for: ./vm usb-attach <vm_name> <usb_id> <usb_name>"
+        sort -u "$pair_file"
+      args:
+        executable: /bin/bash
+      register: usb_list_result
+      changed_when: false
+
+    - name: Show USB devices
+      debug:
+        msg: "{{ usb_list_result.stdout_lines }}"

@@ -1,0 +1,15 @@
+# Common role defaults
+vm_name: "vm-01"
+vm_type: "base"
+vm_memory: 8192
+vm_vcpus: 4
+vm_disk_size: "32G"
+
+# Additional users (list of dicts with name, shell, sudo keys)
+extra_users: []
+
+# Additional packages to install
+extra_packages: []
+
+# Additional runcmd entries (list of strings)
+extra_runcmd: []

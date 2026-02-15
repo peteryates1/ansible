@@ -1,0 +1,69 @@
+---
+# Copy SSH public key from one VM to another
+# Usage:
+#   ansible-playbook playbooks/copy-key.yml \
+#     -e src_vm=claude01 -e src_user=claude \
+#     -e dest_vm=git01 -e dest_user=git
+
+- name: Copy SSH public key between VMs
+  hosts: localhost
+  become: true
+
+  vars:
+    src_vm: "{{ src_vm }}"
+    src_user: "{{ src_user | default('claude') }}"
+    dest_vm: "{{ dest_vm }}"
+    dest_user: "{{ dest_user | default('git') }}"
+    vm_user: "{{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}"
+
+  tasks:
+    - name: Validate required variables
+      fail:
+        msg: "Required: src_vm and dest_vm. Usage: -e src_vm=claude01 -e dest_vm=git01"
+      when: src_vm is not defined or dest_vm is not defined
+
+    - name: Get source VM IP
+      shell: virsh domifaddr {{ src_vm }} | grep -oP '(\d+\.){3}\d+' | head -1
+      register: src_ip
+      changed_when: false
+
+    - name: Get destination VM IP
+      shell: virsh domifaddr {{ dest_vm }} | grep -oP '(\d+\.){3}\d+' | head -1
+      register: dest_ip
+      changed_when: false
+
+    - name: Fail if IPs not found
+      fail:
+        msg: "Could not get IP for {{ src_vm }} or {{ dest_vm }}. Are they running?"
+      when: src_ip.stdout == "" or dest_ip.stdout == ""
+
+    - name: Get public key from source VM
+      command: >
+        sudo -u {{ vm_user }} ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        {{ src_user }}@{{ src_ip.stdout }} cat /home/{{ src_user }}/.ssh/id_ed25519.pub
+      register: pubkey
+      changed_when: false
+
+    - name: Display the public key being copied (verbose only)
+      debug:
+        msg: "Copying key: {{ pubkey.stdout }}"
+        verbosity: 1
+
+    - name: Add public key to destination VM user
+      command: >
+        sudo -u {{ vm_user }} ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        {{ vm_user }}@{{ dest_ip.stdout }}
+        "sudo mkdir -p /home/{{ dest_user }}/.ssh &&
+         echo '{{ pubkey.stdout }}' | sudo tee -a /home/{{ dest_user }}/.ssh/authorized_keys &&
+         sudo chown -R {{ dest_user }}:{{ dest_user }} /home/{{ dest_user }}/.ssh &&
+         sudo chmod 700 /home/{{ dest_user }}/.ssh &&
+         sudo chmod 600 /home/{{ dest_user }}/.ssh/authorized_keys"
+      register: add_key_result
+
+    - name: Success
+      debug:
+        msg: |
+          Key copied successfully!
+          {{ src_user }}@{{ src_vm }} can now SSH to {{ dest_user }}@{{ dest_vm }}
+          Test with: ./vm ssh {{ src_vm }} {{ src_user }}
+          Then run: ssh {{ dest_user }}@{{ dest_ip.stdout }}

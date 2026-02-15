@@ -1,0 +1,67 @@
+---
+# Destroy a VM template
+# Usage: ansible-playbook playbooks/template-destroy.yml -e template_type=common
+
+- name: Destroy VM template
+  hosts: localhost
+  become: true
+
+  vars:
+    template_type: "{{ template_type | default('') }}"
+    template_dir: /var/lib/libvirt/images/templates
+
+  tasks:
+    - name: Validate template type
+      fail:
+        msg: "Invalid template_type '{{ template_type }}'. Must be: common, claude, git, or opencode"
+      when: template_type not in ['common', 'claude', 'git', 'opencode']
+
+    - name: Set template path
+      set_fact:
+        template_path: "{{ template_dir }}/{{ template_type }}-base.qcow2"
+
+    - name: Adjust path for common template
+      set_fact:
+        template_path: "{{ template_dir }}/common-hardened.qcow2"
+      when: template_type == 'common'
+
+    - name: Check if template exists
+      stat:
+        path: "{{ template_path }}"
+      register: template_exists
+
+    - name: Template not found
+      debug:
+        msg: "Template {{ template_path }} does not exist."
+      when: not template_exists.stat.exists
+
+    - name: Check for dependent templates (common only)
+      find:
+        paths: "{{ template_dir }}"
+        patterns: "*-base.qcow2"
+      register: dependent_templates
+      when: template_type == 'common' and template_exists.stat.exists
+
+    - name: Warn about dependent templates
+      fail:
+        msg: |
+          Cannot destroy common-hardened template while role templates exist:
+          {% for t in dependent_templates.files %}
+          - {{ t.path | basename }}
+          {% endfor %}
+          Destroy role templates first with: ./vm template destroy claude
+      when: >
+        template_type == 'common' and
+        template_exists.stat.exists and
+        dependent_templates.files | length > 0
+
+    - name: Remove template file
+      file:
+        path: "{{ template_path }}"
+        state: absent
+      when: template_exists.stat.exists
+
+    - name: Template destroyed
+      debug:
+        msg: "Template {{ template_path | basename }} has been removed."
+      when: template_exists.stat.exists

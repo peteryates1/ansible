@@ -1,0 +1,790 @@
+---
+# Install Quartus and Arrow USB programmer support from host shared directories.
+# Usage:
+#   ansible-playbook playbooks/install-quartus.yml -e vm_name=fpga01
+#
+# Optional overrides:
+#   -e vm_user=peter
+#   -e quartus_share_dir=/var/lib/libvirt/shared/quartus
+#   -e arrow_share_dir=/var/lib/libvirt/shared/Arrow_USB_Programmer_2.5.1_linux64
+#   -e quartus_install_root=/opt/altera/25.1
+#   -e quartus_install_cmd="./setup.sh --mode unattended --accept_eula 1 --installdir /opt/altera/25.1"
+
+- name: Attach installer shares and prepare VM SSH target
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('') }}"
+    requested_vm_user: "{{ vm_user | default('peter') }}"
+    requested_host_ssh_user: "{{ host_ssh_user | default(lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true)) }}"
+
+    requested_quartus_share_dir: "{{ quartus_share_dir | default('/var/lib/libvirt/shared/quartus') }}"
+    requested_quartus_share_tag: "{{ quartus_share_tag | default('quartus_share') }}"
+    requested_quartus_mount_point: "{{ quartus_mount_point | default('/mnt/quartus') }}"
+
+    requested_arrow_share_dir: "{{ arrow_share_dir | default('/var/lib/libvirt/shared/Arrow_USB_Programmer_2.5.1_linux64') }}"
+    requested_arrow_share_tag: "{{ arrow_share_tag | default('arrow_usb_share') }}"
+    requested_arrow_mount_point: "{{ arrow_mount_point | default('/mnt/arrow-usb') }}"
+
+    requested_quartus_install_root: "{{ quartus_install_root | default('/opt/altera/25.1') }}"
+    requested_quartus_install_cmd: "{{ quartus_install_cmd | default('') }}"
+
+  tasks:
+    - name: Validate vm_name
+      fail:
+        msg: "Usage: ansible-playbook playbooks/install-quartus.yml -e vm_name=<name> [-e vm_user=<user>]"
+      when: requested_vm_name == ''
+
+    - name: Verify Quartus share directory exists
+      stat:
+        path: "{{ requested_quartus_share_dir }}"
+      register: quartus_share_stat
+
+    - name: Verify Arrow share directory exists
+      stat:
+        path: "{{ requested_arrow_share_dir }}"
+      register: arrow_share_stat
+
+    - name: Fail when a required shared directory is missing
+      fail:
+        msg: >-
+          Missing shared directories.
+          quartus_share_dir={{ requested_quartus_share_dir }} exists={{ quartus_share_stat.stat.exists | default(false) }}
+          arrow_share_dir={{ requested_arrow_share_dir }} exists={{ arrow_share_stat.stat.exists | default(false) }}
+      when: not quartus_share_stat.stat.exists or not arrow_share_stat.stat.exists
+
+    - name: Check VM existence
+      command: virsh list --all --name
+      register: vm_list
+      changed_when: false
+
+    - name: Fail when VM does not exist
+      fail:
+        msg: "VM '{{ requested_vm_name }}' does not exist."
+      when: requested_vm_name not in vm_list.stdout_lines
+
+    - name: Attach Quartus share via virtiofs
+      shell: |
+        set -euo pipefail
+
+        detect_existing_fs_type() {
+          virsh dumpxml "{{ requested_vm_name }}" | awk -v tag="{{ requested_quartus_share_tag }}" '
+            BEGIN { infs=0; block="" }
+            {
+              if ($0 ~ /<filesystem/) {
+                infs=1
+                block=$0 ORS
+                next
+              }
+              if (infs) {
+                block=block $0 ORS
+                if ($0 ~ /<\/filesystem>/) {
+                  if (block ~ ("<target[[:space:]]+dir=[\"\\047]" tag "[\"\\047]")) {
+                    if (block ~ /virtiofs/) {
+                      print "virtiofs"
+                    } else {
+                      print "9p"
+                    }
+                    exit
+                  }
+                  infs=0
+                  block=""
+                }
+              }
+            }
+          '
+        }
+
+        existing_fs_type="$(detect_existing_fs_type)"
+        if [ -n "$existing_fs_type" ]; then
+          echo "already_attached:${existing_fs_type}"
+          exit 0
+        fi
+
+        xml_file="$(mktemp /tmp/{{ requested_quartus_share_tag }}-XXXXXX.xml)"
+        err_file="$(mktemp /tmp/{{ requested_quartus_share_tag }}-XXXXXX.err)"
+        attach_result=""
+        cleanup() {
+          rm -f "$xml_file"
+          rm -f "$err_file"
+        }
+        trap cleanup EXIT
+
+        attach_share() {
+          local fs_type="$1"
+          local target_exists_config=0
+
+          if [ "$fs_type" = "virtiofs" ]; then
+            cat > "$xml_file" <<EOF
+        <filesystem type='mount' accessmode='passthrough'>
+          <driver type='virtiofs'/>
+          <source dir='{{ requested_quartus_share_dir }}'/>
+          <target dir='{{ requested_quartus_share_tag }}'/>
+        </filesystem>
+        EOF
+          else
+            cat > "$xml_file" <<EOF
+        <filesystem type='mount' accessmode='passthrough'>
+          <source dir='{{ requested_quartus_share_dir }}'/>
+          <target dir='{{ requested_quartus_share_tag }}'/>
+        </filesystem>
+        EOF
+          fi
+
+          if ! virsh attach-device "{{ requested_vm_name }}" "$xml_file" --config 2>"$err_file"; then
+            if grep -qi "Target already exists" "$err_file"; then
+              target_exists_config=1
+            else
+              return 1
+            fi
+          fi
+
+          if virsh domstate "{{ requested_vm_name }}" | tr '[:upper:]' '[:lower:]' | grep -q "running"; then
+            if [ "$fs_type" = "virtiofs" ]; then
+              if ! virsh attach-device "{{ requested_vm_name }}" "$xml_file" --live 2>"$err_file"; then
+                if grep -qi "Target already exists" "$err_file"; then
+                  existing_fs_type="$(detect_existing_fs_type)"
+                  if [ -n "$existing_fs_type" ]; then
+                    attach_result="already_attached:${existing_fs_type}"
+                  elif [ "$target_exists_config" -eq 1 ]; then
+                    attach_result="already_attached:unknown"
+                  else
+                    attach_result="already_attached:${fs_type}"
+                  fi
+                  return 0
+                else
+                  return 1
+                fi
+              fi
+            else
+              # 9p cannot be live-hotplugged; config attach + reboot is required.
+              attach_result="attached:${fs_type}"
+              return 0
+            fi
+            attach_result="attached:${fs_type}"
+            return 0
+          fi
+
+          if [ "$target_exists_config" -eq 1 ]; then
+            existing_fs_type="$(detect_existing_fs_type)"
+            if [ -n "$existing_fs_type" ]; then
+              attach_result="already_attached:${existing_fs_type}"
+            else
+              attach_result="already_attached:unknown"
+            fi
+          else
+            attach_result="attached:${fs_type}"
+          fi
+
+          return 0
+        }
+
+        if attach_share "virtiofs"; then
+          echo "$attach_result"
+          exit 0
+        fi
+
+        if grep -qi "requires shared memory" "$err_file"; then
+          if attach_share "9p"; then
+            echo "$attach_result"
+            exit 0
+          fi
+        fi
+
+        cat "$err_file" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: quartus_share_attach
+      changed_when: "'attached:' in quartus_share_attach.stdout"
+
+    - name: Attach Arrow share via virtiofs
+      shell: |
+        set -euo pipefail
+
+        detect_existing_fs_type() {
+          virsh dumpxml "{{ requested_vm_name }}" | awk -v tag="{{ requested_arrow_share_tag }}" '
+            BEGIN { infs=0; block="" }
+            {
+              if ($0 ~ /<filesystem/) {
+                infs=1
+                block=$0 ORS
+                next
+              }
+              if (infs) {
+                block=block $0 ORS
+                if ($0 ~ /<\/filesystem>/) {
+                  if (block ~ ("<target[[:space:]]+dir=[\"\\047]" tag "[\"\\047]")) {
+                    if (block ~ /virtiofs/) {
+                      print "virtiofs"
+                    } else {
+                      print "9p"
+                    }
+                    exit
+                  }
+                  infs=0
+                  block=""
+                }
+              }
+            }
+          '
+        }
+
+        existing_fs_type="$(detect_existing_fs_type)"
+        if [ -n "$existing_fs_type" ]; then
+          echo "already_attached:${existing_fs_type}"
+          exit 0
+        fi
+
+        xml_file="$(mktemp /tmp/{{ requested_arrow_share_tag }}-XXXXXX.xml)"
+        err_file="$(mktemp /tmp/{{ requested_arrow_share_tag }}-XXXXXX.err)"
+        attach_result=""
+        cleanup() {
+          rm -f "$xml_file"
+          rm -f "$err_file"
+        }
+        trap cleanup EXIT
+
+        attach_share() {
+          local fs_type="$1"
+          local target_exists_config=0
+
+          if [ "$fs_type" = "virtiofs" ]; then
+            cat > "$xml_file" <<EOF
+        <filesystem type='mount' accessmode='passthrough'>
+          <driver type='virtiofs'/>
+          <source dir='{{ requested_arrow_share_dir }}'/>
+          <target dir='{{ requested_arrow_share_tag }}'/>
+        </filesystem>
+        EOF
+          else
+            cat > "$xml_file" <<EOF
+        <filesystem type='mount' accessmode='passthrough'>
+          <source dir='{{ requested_arrow_share_dir }}'/>
+          <target dir='{{ requested_arrow_share_tag }}'/>
+        </filesystem>
+        EOF
+          fi
+
+          if ! virsh attach-device "{{ requested_vm_name }}" "$xml_file" --config 2>"$err_file"; then
+            if grep -qi "Target already exists" "$err_file"; then
+              target_exists_config=1
+            else
+              return 1
+            fi
+          fi
+
+          if virsh domstate "{{ requested_vm_name }}" | tr '[:upper:]' '[:lower:]' | grep -q "running"; then
+            if [ "$fs_type" = "virtiofs" ]; then
+              if ! virsh attach-device "{{ requested_vm_name }}" "$xml_file" --live 2>"$err_file"; then
+                if grep -qi "Target already exists" "$err_file"; then
+                  existing_fs_type="$(detect_existing_fs_type)"
+                  if [ -n "$existing_fs_type" ]; then
+                    attach_result="already_attached:${existing_fs_type}"
+                  elif [ "$target_exists_config" -eq 1 ]; then
+                    attach_result="already_attached:unknown"
+                  else
+                    attach_result="already_attached:${fs_type}"
+                  fi
+                  return 0
+                else
+                  return 1
+                fi
+              fi
+            else
+              # 9p cannot be live-hotplugged; config attach + reboot is required.
+              attach_result="attached:${fs_type}"
+              return 0
+            fi
+            attach_result="attached:${fs_type}"
+            return 0
+          fi
+
+          if [ "$target_exists_config" -eq 1 ]; then
+            existing_fs_type="$(detect_existing_fs_type)"
+            if [ -n "$existing_fs_type" ]; then
+              attach_result="already_attached:${existing_fs_type}"
+            else
+              attach_result="already_attached:unknown"
+            fi
+          else
+            attach_result="attached:${fs_type}"
+          fi
+
+          return 0
+        }
+
+        if attach_share "virtiofs"; then
+          echo "$attach_result"
+          exit 0
+        fi
+
+        if grep -qi "requires shared memory" "$err_file"; then
+          if attach_share "9p"; then
+            echo "$attach_result"
+            exit 0
+          fi
+        fi
+
+        cat "$err_file" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: arrow_share_attach
+      changed_when: "'attached:' in arrow_share_attach.stdout"
+
+    - name: Determine effective share filesystem types
+      set_fact:
+        effective_quartus_fs_type: "{{ 'unknown' if ':unknown' in quartus_share_attach.stdout else ('9p' if ':9p' in quartus_share_attach.stdout else 'virtiofs') }}"
+        effective_arrow_fs_type: "{{ 'unknown' if ':unknown' in arrow_share_attach.stdout else ('9p' if ':9p' in arrow_share_attach.stdout else 'virtiofs') }}"
+        share_reboot_required: >-
+          {{
+            ('attached:9p' in quartus_share_attach.stdout)
+            or ('attached:9p' in arrow_share_attach.stdout)
+            or ('already_attached:unknown' in quartus_share_attach.stdout)
+            or ('already_attached:unknown' in arrow_share_attach.stdout)
+            or (':unknown' in quartus_share_attach.stdout)
+            or (':unknown' in arrow_share_attach.stdout)
+          }}
+
+    - name: Check VM state
+      command: virsh domstate {{ requested_vm_name }}
+      register: vm_state
+      changed_when: false
+
+    - name: Start VM if not running
+      shell: |
+        set -euo pipefail
+
+        vm="{{ requested_vm_name }}"
+        start_out="$(virsh start "$vm" 2>&1)" && {
+          echo "started"
+          exit 0
+        }
+        echo "$start_out" >&2
+
+        if ! echo "$start_out" | grep -qi "Did not find USB device"; then
+          exit 1
+        fi
+
+        xml_file="$(mktemp /tmp/${vm}-domain-XXXXXX.xml)"
+        clean_xml_file="$(mktemp /tmp/${vm}-domain-clean-XXXXXX.xml)"
+        cleanup() {
+          rm -f "$xml_file" "$clean_xml_file"
+        }
+        trap cleanup EXIT
+
+        virsh dumpxml "$vm" > "$xml_file"
+        awk '
+          BEGIN { skip=0 }
+          /<hostdev[^>]*type=.usb./ { skip=1 }
+          !skip { print }
+          skip && /<\/hostdev>/ { skip=0 }
+        ' "$xml_file" > "$clean_xml_file"
+
+        if cmp -s "$xml_file" "$clean_xml_file"; then
+          echo "Failed to start VM and no removable USB hostdev blocks were found." >&2
+          exit 1
+        fi
+
+        virsh define "$clean_xml_file" >/dev/null
+        retry_out="$(virsh start "$vm" 2>&1)" && {
+          echo "started_after_usb_cleanup"
+          exit 0
+        }
+        echo "$retry_out" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      when: "'running' not in (vm_state.stdout | lower)"
+      register: vm_started
+      changed_when: "'started' in vm_started.stdout"
+
+    - name: Shutdown running VM to apply filesystem device config
+      command: virsh shutdown {{ requested_vm_name }}
+      when: "'running' in (vm_state.stdout | lower) and share_reboot_required"
+      register: vm_shutdown
+      changed_when: vm_shutdown.rc == 0
+
+    - name: Wait for VM to power off
+      shell: |
+        state="$(virsh domstate {{ requested_vm_name }} | tr '[:upper:]' '[:lower:]')"
+        if echo "$state" | grep -q "shut off"; then
+          exit 0
+        fi
+        exit 1
+      args:
+        executable: /bin/bash
+      register: vm_poweroff_wait
+      changed_when: false
+      retries: 30
+      delay: 2
+      until: vm_poweroff_wait.rc == 0
+      when: vm_shutdown is changed
+
+    - name: Start VM after shutdown
+      shell: |
+        set -euo pipefail
+
+        vm="{{ requested_vm_name }}"
+        start_out="$(virsh start "$vm" 2>&1)" && {
+          echo "started"
+          exit 0
+        }
+        echo "$start_out" >&2
+
+        if ! echo "$start_out" | grep -qi "Did not find USB device"; then
+          exit 1
+        fi
+
+        xml_file="$(mktemp /tmp/${vm}-domain-XXXXXX.xml)"
+        clean_xml_file="$(mktemp /tmp/${vm}-domain-clean-XXXXXX.xml)"
+        cleanup() {
+          rm -f "$xml_file" "$clean_xml_file"
+        }
+        trap cleanup EXIT
+
+        virsh dumpxml "$vm" > "$xml_file"
+        awk '
+          BEGIN { skip=0 }
+          /<hostdev[^>]*type=.usb./ { skip=1 }
+          !skip { print }
+          skip && /<\/hostdev>/ { skip=0 }
+        ' "$xml_file" > "$clean_xml_file"
+
+        if cmp -s "$xml_file" "$clean_xml_file"; then
+          echo "Failed to start VM and no removable USB hostdev blocks were found." >&2
+          exit 1
+        fi
+
+        virsh define "$clean_xml_file" >/dev/null
+        retry_out="$(virsh start "$vm" 2>&1)" && {
+          echo "started_after_usb_cleanup"
+          exit 0
+        }
+        echo "$retry_out" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      when: vm_shutdown is changed
+      register: vm_restarted
+      changed_when: "'started' in vm_restarted.stdout"
+
+    - name: Wait for VM boot after start
+      pause:
+        seconds: 10
+      when: vm_started is changed or vm_restarted is changed
+
+    - name: Resolve VM IP
+      shell: |
+        set -euo pipefail
+
+        mac="$(virsh -c qemu:///system domiflist '{{ requested_vm_name }}' 2>/dev/null | awk 'NR > 2 && $5 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { print $5; exit }')"
+        ip=""
+
+        if [ -n "$mac" ]; then
+          ip="$(virsh -c qemu:///system net-dhcp-leases default 2>/dev/null | awk -v mac="$mac" '
+            BEGIN { IGNORECASE = 1 }
+            $0 ~ mac {
+              split($5, parts, "/")
+              print parts[1]
+              exit
+            }
+          ')"
+        fi
+
+        if [ -z "$ip" ]; then
+          ip="$(virsh -c qemu:///system domifaddr '{{ requested_vm_name }}' 2>/dev/null | awk '
+            /ipv4/ {
+              split($4, parts, "/")
+              print parts[1]
+              exit
+            }
+          ')"
+        fi
+
+        echo "$ip"
+      args:
+        executable: /bin/bash
+      register: vm_ip
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: vm_ip.stdout != ""
+
+    - name: Resolve SSH identity arguments from host SSH config
+      shell: |
+        set -euo pipefail
+
+        ssh_config="/home/{{ requested_host_ssh_user }}/.ssh/config"
+        if [ -f "$ssh_config" ]; then
+          identity_lines="$(ssh -F "$ssh_config" -G "{{ vm_ip.stdout }}" 2>/dev/null | awk '/^identityfile / { print $2 }')"
+        else
+          identity_lines="$(ssh -G "{{ vm_ip.stdout }}" 2>/dev/null | awk '/^identityfile / { print $2 }')"
+        fi
+
+        printf '%s\n' "$identity_lines" \
+          | sed "s#^~/#/home/{{ requested_host_ssh_user }}/#" \
+          | awk 'NF && !seen[$0]++ { print }' \
+          | while IFS= read -r key; do
+              [ -f "$key" ] || continue
+              case "$key" in
+                *.pub) continue ;;
+              esac
+              printf -- "-o IdentityFile=%s " "$key"
+            done
+      args:
+        executable: /bin/bash
+      register: resolved_identity_args
+      changed_when: false
+
+    - name: Add dynamic SSH target host
+      add_host:
+        name: quartus_target
+        groups: quartus_targets
+        ansible_host: "{{ vm_ip.stdout }}"
+        ansible_user: "{{ requested_vm_user }}"
+        ansible_ssh_common_args: >-
+          {{
+            ((resolved_identity_args.stdout | trim) ~ ' ')
+            if (resolved_identity_args.stdout | trim) != ''
+            else ''
+          }}-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        quartus_share_tag: "{{ requested_quartus_share_tag }}"
+        quartus_mount_point: "{{ requested_quartus_mount_point }}"
+        quartus_fs_type: "{{ effective_quartus_fs_type }}"
+        quartus_install_root: "{{ requested_quartus_install_root }}"
+        quartus_install_cmd: >-
+          {{
+            requested_quartus_install_cmd
+            if requested_quartus_install_cmd != ''
+            else './setup.sh --mode unattended --accept_eula 1 --installdir ' ~ requested_quartus_install_root
+          }}
+        arrow_share_tag: "{{ requested_arrow_share_tag }}"
+        arrow_mount_point: "{{ requested_arrow_mount_point }}"
+        arrow_fs_type: "{{ effective_arrow_fs_type }}"
+
+- name: Install Quartus and Arrow USB support in VM
+  hosts: quartus_targets
+  become: true
+  gather_facts: false
+
+  vars:
+    requested_quartus_force_reinstall: "{{ quartus_force_reinstall | default(false) | bool }}"
+    requested_unmount_after_install: "{{ unmount_after_install | default(true) | bool }}"
+    arrow_udev_rules_path: /etc/udev/rules.d/51-arrow_usb_blaster.rules
+
+  tasks:
+    - name: Wait for SSH
+      wait_for_connection:
+        timeout: 300
+
+    - name: Ensure installer mount directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ quartus_mount_point }}"
+        - "{{ arrow_mount_point }}"
+
+    - name: Mount Quartus share
+      shell: |
+        set -euo pipefail
+        if mountpoint -q "{{ quartus_mount_point }}"; then
+          echo "already_mounted"
+          exit 0
+        fi
+
+        mount_share() {
+          local fs_type="$1"
+          if [ "$fs_type" = "9p" ]; then
+            modprobe 9pnet_virtio >/dev/null 2>&1 || true
+            modprobe 9pnet >/dev/null 2>&1 || true
+            modprobe 9p >/dev/null 2>&1 || true
+            mount -t 9p -o trans=virtio,version=9p2000.L "{{ quartus_share_tag }}" "{{ quartus_mount_point }}"
+          else
+            modprobe virtiofs >/dev/null 2>&1 || true
+            mount -t virtiofs "{{ quartus_share_tag }}" "{{ quartus_mount_point }}"
+          fi
+        }
+
+        preferred="{{ quartus_fs_type }}"
+        if mount_share "$preferred"; then
+          echo "mounted:${preferred}"
+          exit 0
+        fi
+
+        if [ "$preferred" = "9p" ]; then
+          alternate="virtiofs"
+        else
+          alternate="9p"
+        fi
+
+        mount_share "$alternate"
+        echo "mounted:${alternate}"
+      args:
+        executable: /bin/bash
+      register: quartus_mount_result
+      changed_when: "'mounted:' in quartus_mount_result.stdout"
+
+    - name: Mount Arrow share
+      shell: |
+        set -euo pipefail
+        if mountpoint -q "{{ arrow_mount_point }}"; then
+          echo "already_mounted"
+          exit 0
+        fi
+
+        mount_share() {
+          local fs_type="$1"
+          if [ "$fs_type" = "9p" ]; then
+            modprobe 9pnet_virtio >/dev/null 2>&1 || true
+            modprobe 9pnet >/dev/null 2>&1 || true
+            modprobe 9p >/dev/null 2>&1 || true
+            mount -t 9p -o trans=virtio,version=9p2000.L "{{ arrow_share_tag }}" "{{ arrow_mount_point }}"
+          else
+            modprobe virtiofs >/dev/null 2>&1 || true
+            mount -t virtiofs "{{ arrow_share_tag }}" "{{ arrow_mount_point }}"
+          fi
+        }
+
+        preferred="{{ arrow_fs_type }}"
+        if mount_share "$preferred"; then
+          echo "mounted:${preferred}"
+          exit 0
+        fi
+
+        if [ "$preferred" = "9p" ]; then
+          alternate="virtiofs"
+        else
+          alternate="9p"
+        fi
+
+        mount_share "$alternate"
+        echo "mounted:${alternate}"
+      args:
+        executable: /bin/bash
+      register: arrow_mount_result
+      changed_when: "'mounted:' in arrow_mount_result.stdout"
+
+    - name: Verify Quartus setup.sh exists
+      stat:
+        path: "{{ quartus_mount_point }}/setup.sh"
+      register: quartus_setup
+
+    - name: Verify Arrow library payload exists
+      stat:
+        path: "{{ arrow_mount_point }}/libjtag_hw_arrow.so"
+      register: arrow_lib
+
+    - name: Fail when installer payloads are missing
+      fail:
+        msg: >-
+          Missing installer payload in mounted shares.
+          quartus_setup={{ quartus_mount_point }}/setup.sh exists={{ quartus_setup.stat.exists | default(false) }}
+          arrow_lib={{ arrow_mount_point }}/libjtag_hw_arrow.so exists={{ arrow_lib.stat.exists | default(false) }}
+      when: not quartus_setup.stat.exists or not arrow_lib.stat.exists
+
+    - name: Check if Quartus install root exists
+      stat:
+        path: "{{ quartus_install_root }}"
+      register: quartus_install_root_stat
+
+    - name: Install Quartus in unattended mode
+      shell: "{{ quartus_install_cmd }}"
+      args:
+        chdir: "{{ quartus_mount_point }}"
+        executable: /bin/bash
+      when: requested_quartus_force_reinstall or not quartus_install_root_stat.stat.exists
+      register: quartus_install_result
+
+    - name: Locate Quartus linux64 directory
+      shell: |
+        set -euo pipefail
+        find "{{ quartus_install_root }}" -type d -path "*/quartus/linux64" | sort | tail -n 1
+      args:
+        executable: /bin/bash
+      register: quartus_linux64_dir
+      changed_when: false
+
+    - name: Fail if Quartus linux64 directory was not found
+      fail:
+        msg: >-
+          Could not locate Quartus linux64 directory under {{ quartus_install_root }}.
+          Check quartus_install_root and quartus_install_cmd.
+      when: quartus_linux64_dir.stdout == ''
+
+    - name: Install Arrow USB programmer shared library
+      copy:
+        src: "{{ arrow_mount_point }}/libjtag_hw_arrow.so"
+        dest: "{{ quartus_linux64_dir.stdout }}/libjtag_hw_arrow.so"
+        remote_src: true
+        mode: '0644'
+
+    - name: Install Arrow USB programmer configuration
+      copy:
+        src: "{{ arrow_mount_point }}/arrow_usb_blaster.conf"
+        dest: /etc/arrow_usb_blaster.conf
+        remote_src: true
+        mode: '0644'
+
+    - name: Install Arrow USB udev rule
+      copy:
+        dest: "{{ arrow_udev_rules_path }}"
+        mode: '0644'
+        content: |
+          # Arrow-USB-Programmer
+          SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="6010", MODE="0666", NAME="bus/usb/$env{BUSNUM}/$env{DEVNUM}", RUN+="/bin/chmod 0666 %c"
+          SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTR{interface}=="Arrow USB Blaster*", ATTR{bInterfaceNumber}=="00", RUN="/bin/sh -c 'echo $kernel > /sys/bus/usb/drivers/ftdi_sio/unbind'"
+      register: arrow_udev_rule
+
+    - name: Reload udev rules if rule file changed
+      shell: |
+        set -euo pipefail
+        udevadm control --reload-rules
+        udevadm trigger --attr-match=idVendor=0403 --attr-match=idProduct=6010 || true
+      args:
+        executable: /bin/bash
+      when: arrow_udev_rule is changed
+      changed_when: true
+
+    - name: Display installation summary
+      debug:
+        msg: |
+          Quartus install root: {{ quartus_install_root }}
+          Quartus linux64 dir: {{ quartus_linux64_dir.stdout }}
+          Arrow USB library installed: {{ quartus_linux64_dir.stdout }}/libjtag_hw_arrow.so
+          Arrow USB config installed: /etc/arrow_usb_blaster.conf
+          Udev rule installed: {{ arrow_udev_rules_path }}
+
+    - name: Unmount Quartus installer share
+      shell: |
+        set -euo pipefail
+        if mountpoint -q "{{ quartus_mount_point }}"; then
+          umount "{{ quartus_mount_point }}" || umount -l "{{ quartus_mount_point }}"
+          echo "unmounted"
+        else
+          echo "already_unmounted"
+        fi
+      args:
+        executable: /bin/bash
+      register: quartus_unmount_result
+      changed_when: "'unmounted' in quartus_unmount_result.stdout"
+      when: requested_unmount_after_install
+
+    - name: Unmount Arrow installer share
+      shell: |
+        set -euo pipefail
+        if mountpoint -q "{{ arrow_mount_point }}"; then
+          umount "{{ arrow_mount_point }}" || umount -l "{{ arrow_mount_point }}"
+          echo "unmounted"
+        else
+          echo "already_unmounted"
+        fi
+      args:
+        executable: /bin/bash
+      register: arrow_unmount_result
+      changed_when: "'unmounted' in arrow_unmount_result.stdout"
+      when: requested_unmount_after_install

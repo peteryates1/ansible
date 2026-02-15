@@ -1,0 +1,537 @@
+#!/bin/bash
+# VM management wrapper script
+# Usage:
+#   ./vm create common01 common     # Create common base VM
+#   ./vm create claude01 claude     # Create Claude Code VM
+#   ./vm create git01 git           # Create Git Server VM
+#   ./vm create opencode01 opencode # Create OpenCode VM
+#   ./vm destroy claude01           # Destroy VM
+#   ./vm start claude01             # Start VM
+#   ./vm stop claude01              # Stop VM
+#   ./vm status claude01            # Get VM status
+#   ./vm ip claude01                # Get VM IP address
+#   ./vm list                       # List all VMs
+#   ./vm ssh claude01 [user]        # SSH to VM (default: peter)
+#   ./vm ssh claude01 -- lsusb      # Run command as default user
+#   ./vm ssh claude01 claude -- lsusb  # Run command as specific user
+#   ./vm copy-key claude01 git01    # Copy claude's SSH key to git user on git01
+#   ./vm usb-list                    # List host USB devices with IDs and names
+#   ./vm usb-serials                 # List USB serial ports and mapped USB identity
+#   ./vm usb-attach claude01 09fb:6001 "Altera Blaster"             # Attach unique USB device
+#   ./vm usb-attach jop 0403:6010 "Arrow USB Blaster TEI0050"       # Attach duplicate ID by name
+#   ./vm usb-attach fpga01 0403:6010 001:011 "Arrow Blaster"        # Attach specific duplicate USB ID
+#   ./vm usb-detach all 09fb:6001 "Altera Blaster"                  # Detach USB device from all VMs
+#   ./vm usb-detach fpga01 0403:6010 001:011 "Arrow Blaster"        # Detach specific duplicate USB ID
+#   ./vm install-quartus fpga01 [user]  # Install Quartus + Arrow USB support from shared host dirs
+#   ./vm install-spinalhdl fpga01 [user]  # Install Java/Scala/sbt toolchain in VM
+#
+# Template commands:
+#   ./vm template create common     # Create hardened base template
+#   ./vm template create claude     # Create Claude Code template
+#   ./vm template create git        # Create Git Server template
+#   ./vm template create opencode   # Create OpenCode template
+#   ./vm template list              # List all templates
+#   ./vm template destroy common    # Remove a template
+
+set -e
+cd "$(dirname "$0")"
+
+ACTION="${1:-help}"
+VM_NAME="${2:-}"
+ARG3="${3:-}"
+ARG4="${4:-}"
+
+run_playbook() {
+    local playbook="$1"
+    shift
+    sudo ansible-playbook "playbooks/${playbook}.yml" "$@"
+}
+
+list_host_usb() {
+    sudo bash <<'SCRIPT'
+set -euo pipefail
+
+if ! command -v lsusb >/dev/null 2>&1; then
+  echo "lsusb command not found. Install usbutils on host."
+  exit 1
+fi
+
+printf "%-7s %-9s %-11s %-30s %s\n" "Bus" "Device" "ID" "Manufacturer" "Product"
+printf "%-7s %-9s %-11s %-30s %s\n" "-----" "------" "----------" "------------------------------" "------------------------------"
+
+pair_file="$(mktemp)"
+cleanup() {
+  rm -f "$pair_file"
+}
+trap cleanup EXIT
+
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+
+  bus="$(echo "$line" | awk '{print $2}')"
+  dev="$(echo "$line" | awk '{gsub(":", "", $4); print $4}')"
+  id="$(echo "$line" | awk '{print $6}')"
+  dev_path="/dev/bus/usb/${bus}/${dev}"
+
+  manufacturer=""
+  product=""
+  if [ -e "$dev_path" ]; then
+    desc="$(lsusb -D "$dev_path" -v 2>/dev/null || true)"
+    manufacturer="$(printf '%s\n' "$desc" | awk '/^[[:space:]]*iManufacturer[[:space:]]+[0-9]+/ && !found { $1=""; $2=""; sub(/^[[:space:]]+/, ""); print; found=1 }')"
+    product="$(printf '%s\n' "$desc" | awk '/^[[:space:]]*iProduct[[:space:]]+[0-9]+/ && !found { $1=""; $2=""; sub(/^[[:space:]]+/, ""); print; found=1 }')"
+  fi
+
+  [ -n "$manufacturer" ] || manufacturer="-"
+  [ -n "$product" ] || product="-"
+  printf "%-7s %-9s %-11s %-30s %s\n" "$bus" "$dev" "$id" "$manufacturer" "$product"
+
+  usb_name="$product"
+  if [ "$usb_name" = "-" ]; then
+    usb_name="$manufacturer"
+  fi
+  if [ "$usb_name" = "-" ]; then
+    usb_name="USB Device"
+  fi
+  usb_name_sanitized="$(printf '%s' "$usb_name" | tr '"' "'")"
+  printf '%s "%s"\n' "$id" "$usb_name_sanitized" >> "$pair_file"
+done < <(lsusb)
+
+echo ""
+echo "Copy/paste USB args for: ./vm usb-attach <vm_name> <usb_id> <usb_name>"
+sort -u "$pair_file"
+SCRIPT
+}
+
+list_host_usb_serials() {
+    sudo bash <<'SCRIPT'
+set -euo pipefail
+
+shopt -s nullglob
+ttys=(/dev/ttyUSB* /dev/ttyACM*)
+
+if [ "${#ttys[@]}" -eq 0 ]; then
+  echo "No /dev/ttyUSB* or /dev/ttyACM* devices found."
+  exit 0
+fi
+
+printf "%-11s %-7s %-7s %-11s %-42s %s\n" "TTY" "Bus" "Device" "ID" "Name" "Serial"
+printf "%-11s %-7s %-7s %-11s %-42s %s\n" "-----------" "-----" "------" "----------" "------------------------------------------" "------------------------------"
+
+pair_file="$(mktemp)"
+cleanup() {
+  rm -f "$pair_file"
+}
+trap cleanup EXIT
+
+for tty in "${ttys[@]}"; do
+  props="$(udevadm info --query=property --name "$tty" 2>/dev/null || true)"
+
+  vid="$(printf '%s\n' "$props" | awk -F= '/^ID_VENDOR_ID=/{print $2; exit}')"
+  pid="$(printf '%s\n' "$props" | awk -F= '/^ID_MODEL_ID=/{print $2; exit}')"
+  vendor_db="$(printf '%s\n' "$props" | awk -F= '/^ID_VENDOR_FROM_DATABASE=/{print $2; exit}')"
+  model_db="$(printf '%s\n' "$props" | awk -F= '/^ID_MODEL_FROM_DATABASE=/{print $2; exit}')"
+  vendor_raw="$(printf '%s\n' "$props" | awk -F= '/^ID_VENDOR=/{print $2; exit}')"
+  model_raw="$(printf '%s\n' "$props" | awk -F= '/^ID_MODEL=/{print $2; exit}')"
+  serial_short="$(printf '%s\n' "$props" | awk -F= '/^ID_SERIAL_SHORT=/{print $2; exit}')"
+
+  [ -n "$vendor_db" ] || vendor_db="$(printf '%s' "${vendor_raw:-}" | tr '_' ' ')"
+  [ -n "$model_db" ] || model_db="$(printf '%s' "${model_raw:-}" | tr '_' ' ')"
+  [ -n "$serial_short" ] || serial_short="-"
+  [ -n "$vendor_db" ] || vendor_db="-"
+  [ -n "$model_db" ] || model_db="-"
+
+  usb_name="$model_db"
+  if [ "$usb_name" = "-" ]; then
+    usb_name="$vendor_db"
+  fi
+  if [ "$usb_name" = "-" ]; then
+    usb_name="USB Serial Device"
+  fi
+
+  id="${vid:-????}:${pid:-????}"
+
+  sys_path="$(readlink -f "/sys/class/tty/$(basename "$tty")/device" 2>/dev/null || true)"
+  usb_dev_path="$sys_path"
+  while [ -n "$usb_dev_path" ] && [ "$usb_dev_path" != "/" ]; do
+    if [ -f "$usb_dev_path/idVendor" ] && [ -f "$usb_dev_path/idProduct" ]; then
+      break
+    fi
+    usb_dev_path="$(dirname "$usb_dev_path")"
+  done
+
+  bus="---"
+  devnum="---"
+  if [ -n "$usb_dev_path" ] && [ -f "$usb_dev_path/busnum" ] && [ -f "$usb_dev_path/devnum" ]; then
+    bus="$(printf '%03d' "$(cat "$usb_dev_path/busnum")")"
+    devnum="$(printf '%03d' "$(cat "$usb_dev_path/devnum")")"
+  fi
+
+  printf "%-11s %-7s %-7s %-11s %-42s %s\n" "$tty" "$bus" "$devnum" "$id" "$vendor_db $model_db" "$serial_short"
+
+  usb_name_sanitized="$(printf '%s' "$usb_name" | tr '"' "'")"
+  printf '%s "%s"\n' "$id" "$usb_name_sanitized" >> "$pair_file"
+done
+
+echo ""
+echo "Copy/paste USB args from serial devices:"
+sort -u "$pair_file"
+SCRIPT
+}
+
+get_vm_ip() {
+    local vm_name="$1"
+    local mac ip
+
+    mac=$(virsh -c qemu:///system domiflist "$vm_name" 2>/dev/null | awk 'NR > 2 && $5 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { print $5; exit }')
+    if [ -n "$mac" ]; then
+        ip=$(virsh -c qemu:///system net-dhcp-leases default 2>/dev/null | awk -v mac="$mac" '
+            BEGIN { IGNORECASE = 1 }
+            $0 ~ mac {
+                split($5, parts, "/")
+                print parts[1]
+                exit
+            }
+        ')
+    fi
+
+    if [ -z "$ip" ]; then
+        ip=$(virsh -c qemu:///system domifaddr "$vm_name" 2>/dev/null | awk '
+            /ipv4/ {
+                split($4, parts, "/")
+                print parts[1]
+                exit
+            }
+        ')
+    fi
+
+    echo "$ip"
+}
+
+vm_role_types() {
+    find roles -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | awk '
+        BEGIN { first = 1 }
+        {
+            if (!first) {
+                printf ", "
+            }
+            printf "%s", $0
+            first = 0
+        }
+        END {
+            if (first) {
+                printf "(none found)"
+            }
+            printf "\n"
+        }
+    '
+}
+
+case "$ACTION" in
+    template)
+        TEMPLATE_ACTION="${VM_NAME:-help}"
+        TEMPLATE_TYPE="${ARG3:-}"
+        case "$TEMPLATE_ACTION" in
+            create)
+                if [ -z "$TEMPLATE_TYPE" ]; then
+                    echo "Usage: $0 template create <type>"
+                    echo "Types: common, claude, git, opencode"
+                    echo ""
+                    echo "Template hierarchy:"
+                    echo "  1. ./vm template create common    # Base hardened template"
+                    echo "  2. ./vm template create claude    # Requires common"
+                    echo "  2. ./vm template create git       # Requires common"
+                    echo "  2. ./vm template create opencode  # Requires common"
+                    exit 1
+                fi
+                run_playbook template-create -e "template_type=$TEMPLATE_TYPE"
+                ;;
+            list)
+                run_playbook template-list
+                ;;
+            destroy)
+                if [ -z "$TEMPLATE_TYPE" ]; then
+                    echo "Usage: $0 template destroy <type>"
+                    echo "Types: common, claude, git, opencode"
+                    exit 1
+                fi
+                run_playbook template-destroy -e "template_type=$TEMPLATE_TYPE"
+                ;;
+            *)
+                echo "Template subcommands:"
+                echo "  $0 template create <type>   Create a template (common, claude, git, opencode)"
+                echo "  $0 template list            List all templates"
+                echo "  $0 template destroy <type>  Remove a template"
+                echo ""
+                echo "Create templates in order: common -> claude/git/opencode"
+                exit 1
+                ;;
+        esac
+        ;;
+    create)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 create <vm_name> <type>"
+            echo "Types: $(vm_role_types)"
+            echo "Example: $0 create claude01 claude"
+            exit 1
+        fi
+        run_playbook create -e "vm_name=$VM_NAME" -e "vm_role=$ARG3"
+        ;;
+    destroy)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 destroy <vm_name>"
+            exit 1
+        fi
+        run_playbook destroy -e "vm_name=$VM_NAME"
+        ;;
+    start)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 start <vm_name>"
+            exit 1
+        fi
+        run_playbook start -e "vm_name=$VM_NAME"
+        ;;
+    stop)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 stop <vm_name>"
+            exit 1
+        fi
+        run_playbook stop -e "vm_name=$VM_NAME"
+        ;;
+    status)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 status <vm_name>"
+            exit 1
+        fi
+        run_playbook status -e "vm_name=$VM_NAME"
+        ;;
+    ip)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 ip <vm_name>"
+            exit 1
+        fi
+        IP=$(get_vm_ip "$VM_NAME")
+        if [ -z "$IP" ]; then
+            echo "Cannot determine IP for $VM_NAME. Is it running?"
+            exit 1
+        fi
+        echo "$IP"
+        ;;
+    list)
+        run_playbook list
+        ;;
+    ssh)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 ssh <vm_name> [user]"
+            echo "   or: $0 ssh <vm_name> -- <command...>"
+            echo "   or: $0 ssh <vm_name> <user> -- <command...>"
+            echo "Default user: peter"
+            exit 1
+        fi
+        # Disambiguate user vs command with "--":
+        #   ./vm ssh <vm> -- <cmd...>
+        #   ./vm ssh <vm> <user> -- <cmd...>
+        # Legacy login-only:
+        #   ./vm ssh <vm> <user>
+        if [ "$ARG3" = "--" ]; then
+            USER="peter"
+            shift 3
+        elif [[ "$ARG3" =~ ^[a-z_][a-z0-9_-]*$ ]] && [ "$ARG4" = "--" ]; then
+            USER="$ARG3"
+            shift 4
+        elif [[ "$ARG3" =~ ^[a-z_][a-z0-9_-]*$ ]] && [ "$#" -eq 3 ]; then
+            USER="$ARG3"
+            shift 3
+        else
+            USER="peter"
+            shift 2
+        fi
+        IP=$(get_vm_ip "$VM_NAME")
+        if [ -z "$IP" ]; then
+            echo "Cannot determine IP for $VM_NAME. Is it running?"
+            exit 1
+        fi
+        echo "Connecting to $USER@$IP ($VM_NAME)..."
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$IP" "$@"
+        ;;
+    copy-key)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 copy-key <src_vm> <dest_vm> [src_user] [dest_user]"
+            echo "Copies SSH public key from src_user on src_vm to dest_user on dest_vm"
+            echo "Defaults: src_user=claude, dest_user=git"
+            echo ""
+            echo "Example: $0 copy-key claude01 git01"
+            echo "         $0 copy-key claude01 git01 claude git"
+            exit 1
+        fi
+        SRC_USER="${4:-claude}"
+        DEST_USER="${5:-git}"
+        run_playbook copy-key -e "src_vm=$VM_NAME" -e "dest_vm=$ARG3" -e "src_user=$SRC_USER" -e "dest_user=$DEST_USER"
+        ;;
+    usb-list)
+        list_host_usb
+        ;;
+    usb-serials)
+        list_host_usb_serials
+        ;;
+    usb-attach)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 usb-attach <vm_name> <usb_id> [usb_addr] [usb_name]"
+            echo "usb_id format: vvvv:pppp (copy from lsusb)"
+            echo "For duplicate IDs, prefer usb_name; use usb_addr (BBB:DDD) when needed."
+            echo "Examples:"
+            echo "  $0 usb-attach claude01 09fb:6001 \"Altera Blaster\""
+            echo "  $0 usb-attach jop 0403:6010 \"Arrow USB Blaster TEI0050\""
+            echo "  $0 usb-attach fpga01 0403:6010 001:011 \"Arrow Blaster\""
+            exit 1
+        fi
+        USB_ADDR=""
+        if [[ "$ARG4" =~ ^[0-9]{1,3}:[0-9]{1,3}$ ]]; then
+            USB_ADDR="$ARG4"
+            USB_NAME="${*:5}"
+        else
+            USB_NAME="${*:4}"
+        fi
+        if [ -n "$USB_NAME" ]; then
+            if [ -n "$USB_ADDR" ]; then
+                run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR" -e "usb_name='$USB_NAME'"
+            else
+                run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_name='$USB_NAME'"
+            fi
+        else
+            if [ -n "$USB_ADDR" ]; then
+                run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR"
+            else
+                run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+            fi
+        fi
+        ;;
+    usb-detach)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 usb-detach <vm_name|all> <usb_id> [usb_addr] [usb_name]"
+            echo "usb_id format: vvvv:pppp (copy from lsusb)"
+            echo "usb_addr format: BBB:DDD from lsusb Bus/Device (for duplicate IDs)"
+            echo "Examples:"
+            echo "  $0 usb-detach all 09fb:6001 \"Altera Blaster\""
+            echo "  $0 usb-detach claude01 09fb:6001"
+            echo "  $0 usb-detach fpga01 0403:6010 001:011 \"Arrow Blaster\""
+            exit 1
+        fi
+        USB_ADDR=""
+        if [[ "$ARG4" =~ ^[0-9]{1,3}:[0-9]{1,3}$ ]]; then
+            USB_ADDR="$ARG4"
+            USB_NAME="${*:5}"
+        else
+            USB_NAME="${*:4}"
+        fi
+        if [ "$VM_NAME" = "all" ]; then
+            if [ -n "$USB_NAME" ]; then
+                if [ -n "$USB_ADDR" ]; then
+                    run_playbook usb-detach -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR" -e "usb_name='$USB_NAME'"
+                else
+                    run_playbook usb-detach -e "usb_id=$ARG3" -e "usb_name='$USB_NAME'"
+                fi
+            else
+                if [ -n "$USB_ADDR" ]; then
+                    run_playbook usb-detach -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR"
+                else
+                    run_playbook usb-detach -e "usb_id=$ARG3"
+                fi
+            fi
+        else
+            if [ -n "$USB_NAME" ]; then
+                if [ -n "$USB_ADDR" ]; then
+                    run_playbook usb-detach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR" -e "usb_name='$USB_NAME'"
+                else
+                    run_playbook usb-detach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_name='$USB_NAME'"
+                fi
+            else
+                if [ -n "$USB_ADDR" ]; then
+                    run_playbook usb-detach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR"
+                else
+                    run_playbook usb-detach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+                fi
+            fi
+        fi
+        ;;
+    install-quartus)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 install-quartus <vm_name> [vm_user]"
+            echo "Defaults: vm_user=peter"
+            echo "Shared dirs:"
+            echo "  /var/lib/libvirt/shared/quartus"
+            echo "  /var/lib/libvirt/shared/Arrow_USB_Programmer_2.5.1_linux64"
+            exit 1
+        fi
+        INSTALL_USER="${ARG3:-peter}"
+        run_playbook install-quartus -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        ;;
+    install-spinalhdl)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 install-spinalhdl <vm_name> [vm_user]"
+            echo "Defaults: vm_user=peter"
+            exit 1
+        fi
+        INSTALL_USER="${ARG3:-peter}"
+        run_playbook install-spinalhdl -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        ;;
+    help|--help|-h)
+        echo "VM Management Tool"
+        echo ""
+        echo "Usage: $0 <command> [args]"
+        echo ""
+        echo "VM Commands:"
+        echo "  create <name> <type>   Create a VM (types: $(vm_role_types))"
+        echo "  destroy <name>         Destroy a VM and clean up files"
+        echo "  start <name>           Start a VM"
+        echo "  stop <name>            Stop a VM (graceful shutdown)"
+        echo "  status <name>          Show VM status"
+        echo "  ip <name>              Print VM IP address"
+        echo "  list                   List all VMs"
+        echo "  ssh <name> [user]      SSH to VM (default user: peter)"
+        echo "  copy-key <src> <dest>  Copy SSH key from src VM to dest VM"
+        echo "  usb-list               List host USB devices (ID, iManufacturer, iProduct)"
+        echo "  usb-serials            List USB serial ports and mapped USB identity"
+        echo "  usb-attach <name> <usb_id> [usb_addr] [usb_name]  Attach USB device to VM (auto handoff)"
+        echo "  usb-detach <name|all> <usb_id> [usb_addr] [usb_name]  Detach USB device"
+        echo "  install-quartus <name> [user]  Install Quartus + Arrow USB support in VM"
+        echo "  install-spinalhdl <name> [user]  Install Java/Scala/sbt toolchain in VM"
+        echo ""
+        echo "Template Commands:"
+        echo "  template create <type> Create a template (common, claude, git, opencode)"
+        echo "  template list          List all templates"
+        echo "  template destroy <type> Remove a template"
+        echo ""
+        echo "Template Workflow (faster VM creation):"
+        echo "  1. $0 template create common    # Hardened base"
+        echo "  2. $0 template create claude    # Claude Code template"
+        echo "  2. $0 template create git       # Git server template"
+        echo "  2. $0 template create opencode  # OpenCode template"
+        echo "  3. $0 create claude01 claude    # Fast instance from template"
+        echo ""
+        echo "Examples:"
+        echo "  $0 create common01 common"
+        echo "  $0 create claude01 claude"
+        echo "  $0 create git01 git"
+        echo "  $0 ip claude01"
+        echo "  $0 ssh claude01"
+        echo "  $0 ssh claude01 claude"
+        echo "  $0 ssh claude01 -- lsusb"
+        echo "  $0 ssh claude01 claude -- lsusb"
+        echo "  $0 copy-key claude01 git01    # Allow claude@claude01 to access git@git01"
+        echo "  $0 usb-list"
+        echo "  $0 usb-serials"
+        echo "  $0 usb-attach claude01 09fb:6001 \"Altera Blaster\""
+        echo "  $0 usb-attach jop 0403:6010 \"Arrow USB Blaster TEI0050\""
+        echo "  $0 usb-attach fpga01 0403:6010 001:011 \"Arrow Blaster\""
+        echo "  $0 usb-detach all 09fb:6001 \"Altera Blaster\""
+        echo "  $0 usb-detach fpga01 0403:6010 001:011 \"Arrow Blaster\""
+        echo "  $0 install-quartus fpga01"
+        echo "  $0 install-spinalhdl fpga01"
+        echo "  $0 destroy claude01"
+        ;;
+    *)
+        echo "Unknown command: $ACTION"
+        echo "Run '$0 help' for usage"
+        exit 1
+        ;;
+esac

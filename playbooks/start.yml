@@ -1,0 +1,42 @@
+---
+# Start a VM
+# Usage:
+#   ansible-playbook playbooks/start.yml -e vm_name=claude01
+
+- name: Start VM
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name }}"
+
+  tasks:
+    - name: Check vm_name is provided
+      fail:
+        msg: "vm_name is required. Usage: ansible-playbook start.yml -e vm_name=<name>"
+      when: vm_name is not defined or vm_name == ""
+
+    - name: Start VM
+      command: virsh start {{ vm_name }}
+      register: start_result
+      ignore_errors: true
+
+    - name: Wait for VM to boot
+      pause:
+        seconds: 10
+      when: start_result.rc == 0
+
+    - name: Get VM IP address
+      shell: virsh domifaddr {{ vm_name }} | grep -oP '(\d+\.){3}\d+' | head -1
+      register: vm_ip
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: vm_ip.stdout != ""
+
+    - name: Display VM info
+      debug:
+        msg: |
+          VM {{ vm_name }} is running
+          IP: {{ vm_ip.stdout }}
+          SSH: ssh peter@{{ vm_ip.stdout }}

@@ -1,0 +1,45 @@
+---
+# Create a VM
+# Usage:
+#   ansible-playbook playbooks/create.yml -e vm_name=common01 -e vm_role=common
+#   ansible-playbook playbooks/create.yml -e vm_name=claude01 -e vm_role=claude
+#   ansible-playbook playbooks/create.yml -e vm_name=git01 -e vm_role=git
+#   ansible-playbook playbooks/create.yml -e vm_name=opencode01 -e vm_role=opencode
+
+- name: Create VM
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('vm-01') }}"
+    requested_vm_role: "{{ vm_role | default('claude') }}"
+
+  pre_tasks:
+    - name: Discover available vm roles
+      find:
+        paths: "{{ playbook_dir }}/../roles"
+        file_type: directory
+        recurse: false
+      register: role_dirs
+      changed_when: false
+
+    - name: Set available vm roles
+      set_fact:
+        available_vm_roles: >-
+          {{
+            role_dirs.files
+            | map(attribute='path')
+            | map('basename')
+            | sort
+          }}
+
+    - name: Validate vm_role
+      fail:
+        msg: "Invalid vm_role '{{ requested_vm_role }}'. Available roles: {{ available_vm_roles | join(', ') }}."
+      when: requested_vm_role not in available_vm_roles
+
+  roles:
+    - role: "{{ requested_vm_role }}"
+      vars:
+        vm_name: "{{ requested_vm_name }}"
+        vm_type: "{{ requested_vm_role }}"

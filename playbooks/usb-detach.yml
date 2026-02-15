@@ -1,0 +1,216 @@
+---
+# Detach a USB device from one VM (or all VMs if vm_name is omitted).
+# Usage:
+#   ansible-playbook playbooks/usb-detach.yml \
+#     -e vm_name=claude01 -e usb_id=09fb:6001
+# Disambiguate duplicate IDs:
+#   ansible-playbook playbooks/usb-detach.yml \
+#     -e vm_name=claude01 -e usb_id=0403:6010 -e usb_addr=001:011
+#
+# Detach from any VM:
+#   ansible-playbook playbooks/usb-detach.yml \
+#     -e usb_id=09fb:6001
+# Optional:
+#   -e usb_name="Altera Blaster"
+
+- name: Detach USB Device from VM
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('') }}"
+    requested_usb_id: "{{ usb_id | default('') | lower }}"
+    requested_usb_addr: "{{ usb_addr | default('') }}"
+    requested_usb_name: "{{ usb_name | default('') }}"
+    usb_lock_dir: /var/lock/vm-usb
+
+  tasks:
+    - name: Validate required variables
+      fail:
+        msg: "Usage: ansible-playbook usb-detach.yml -e [vm_name=<name>] -e usb_id=vvvv:pppp"
+      when: requested_usb_id == ''
+
+    - name: Validate USB ID format
+      fail:
+        msg: "usb_id must be in format vvvv:pppp (example: 09fb:6001)"
+      when: not (requested_usb_id is match('^[0-9a-f]{4}:[0-9a-f]{4}$'))
+
+    - name: Validate USB address format
+      fail:
+        msg: "usb_addr must be in format BBB:DDD (example: 001:011)"
+      when: requested_usb_addr != '' and not (requested_usb_addr is match('^[0-9]{1,3}:[0-9]{1,3}$'))
+
+    - name: Normalize USB fields
+      set_fact:
+        usb_vendor: "0x{{ requested_usb_id.split(':')[0] }}"
+        usb_product: "0x{{ requested_usb_id.split(':')[1] }}"
+
+    - name: Find matching USB devices on host
+      command: lsusb -d {{ requested_usb_id }}
+      register: lsusb_match
+      changed_when: false
+      failed_when: false
+
+    - name: Find matching USB device on host (optional)
+      command: lsusb -s {{ requested_usb_addr }} -d {{ requested_usb_id }}
+      register: lsusb_selected
+      changed_when: false
+      failed_when: false
+      when: requested_usb_addr != ''
+
+    - name: Fail when specified usb_addr does not match usb_id
+      fail:
+        msg: "No device for usb_id={{ requested_usb_id }} at usb_addr={{ requested_usb_addr }}. Check `lsusb` output."
+      when: requested_usb_addr != '' and lsusb_selected.stdout_lines | length == 0
+
+    - name: Fail when USB ID is ambiguous without usb_addr
+      fail:
+        msg: "Multiple devices match {{ requested_usb_id }}. Pass usb_addr=BBB:DDD from lsusb (example: usb_addr=001:011)."
+      when: requested_usb_addr == '' and lsusb_match.stdout_lines | length > 1
+
+    - name: Select effective USB line
+      set_fact:
+        selected_lsusb_line: >-
+          {{
+            (lsusb_selected.stdout_lines[0]) if requested_usb_addr != '' else
+            (
+              (lsusb_match.stdout_lines[0]) if (lsusb_match.stdout_lines | length == 1) else ''
+            )
+          }}
+
+    - name: Set selector mode and lock key
+      set_fact:
+        use_address_match: "{{ selected_lsusb_line != '' }}"
+        usb_device_key: >-
+          {{
+            (requested_usb_id | regex_replace(':', '-') ~ '-' ~ selected_lsusb_line.split()[1] ~ '-' ~ (selected_lsusb_line.split()[3] | regex_replace(':$', '')))
+            if selected_lsusb_line != '' else
+            (requested_usb_id | regex_replace(':', '-') ~ '-any')
+          }}
+
+    - name: Parse selected USB address
+      set_fact:
+        selected_bus: "{{ selected_lsusb_line.split()[1] }}"
+        selected_device: "{{ selected_lsusb_line.split()[3] | regex_replace(':$', '') }}"
+        selected_usb_addr: "{{ selected_lsusb_line.split()[1] }}:{{ selected_lsusb_line.split()[3] | regex_replace(':$', '') }}"
+      when: use_address_match
+
+    - name: Set USB display name
+      set_fact:
+        usb_display_name: >-
+          {{
+            (requested_usb_name | trim) if (requested_usb_name | trim) != '' else
+            (
+              (
+                selected_lsusb_line
+                | regex_replace('^Bus\\s+\\d+\\s+Device\\s+\\d+:\\s+ID\\s+[0-9a-f]{4}:[0-9a-f]{4}\\s*', '')
+              ) if (selected_lsusb_line != '') else
+              (
+                (
+                  lsusb_match.stdout_lines[0]
+                  | regex_replace('^Bus\\s+\\d+\\s+Device\\s+\\d+:\\s+ID\\s+[0-9a-f]{4}:[0-9a-f]{4}\\s*', '')
+                ) if (lsusb_match.stdout_lines | length > 0) else 'USB Device'
+              )
+            )
+          }}
+
+    - name: Check if VM exists (when vm_name provided)
+      command: virsh list --all --name
+      register: vm_list
+      changed_when: false
+      when: requested_vm_name != ''
+
+    - name: Fail when VM does not exist
+      fail:
+        msg: "VM '{{ requested_vm_name }}' does not exist."
+      when: requested_vm_name != '' and requested_vm_name not in vm_list.stdout_lines
+
+    - name: Ensure USB lock directory exists
+      file:
+        path: "{{ usb_lock_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Detach USB device with lock
+      shell: |
+        set -euo pipefail
+
+        lock_file="{{ usb_lock_dir }}/{{ usb_device_key }}.lock"
+        xml_file="$(mktemp /tmp/usb-hostdev-XXXXXX.xml)"
+        cleanup() {
+          rm -f "$xml_file"
+        }
+        trap cleanup EXIT
+
+        {% if use_address_match %}
+        cat > "$xml_file" <<EOF
+        <hostdev mode='subsystem' type='usb' managed='yes'>
+          <source>
+            <address bus='{{ selected_bus | int }}' device='{{ selected_device | int }}'/>
+          </source>
+        </hostdev>
+        EOF
+        {% else %}
+        cat > "$xml_file" <<EOF
+        <hostdev mode='subsystem' type='usb' managed='yes'>
+          <source>
+            <vendor id='{{ usb_vendor }}'/>
+            <product id='{{ usb_product }}'/>
+          </source>
+        </hostdev>
+        EOF
+        {% endif %}
+
+        exec 9>"$lock_file"
+        flock -x 9
+
+        detached_from=""
+        if [ -n "{{ requested_vm_name }}" ]; then
+          target_vms="{{ requested_vm_name }}"
+        else
+          target_vms="$(virsh list --all --name | sed '/^$/d')"
+        fi
+
+        while IFS= read -r candidate; do
+          [ -z "$candidate" ] && continue
+
+          {% if use_address_match %}
+          if virsh dumpxml "$candidate" | grep -qi "<address bus='{{ selected_bus | int }}' device='{{ selected_device | int }}'"; then
+            virsh detach-device "$candidate" "$xml_file" --config || true
+            if virsh domstate "$candidate" | tr '[:upper:]' '[:lower:]' | grep -q "running"; then
+              virsh detach-device "$candidate" "$xml_file" --live || true
+            fi
+            detached_from="${detached_from}${candidate} "
+          fi
+          {% else %}
+          if virsh dumpxml "$candidate" | grep -qi "<vendor id='{{ usb_vendor }}'" &&
+             virsh dumpxml "$candidate" | grep -qi "<product id='{{ usb_product }}'"; then
+            virsh detach-device "$candidate" "$xml_file" --config || true
+            if virsh domstate "$candidate" | tr '[:upper:]' '[:lower:]' | grep -q "running"; then
+              virsh detach-device "$candidate" "$xml_file" --live || true
+            fi
+            detached_from="${detached_from}${candidate} "
+          fi
+          {% endif %}
+        done <<< "$target_vms"
+
+        if [ -z "$detached_from" ]; then
+          echo "detached_from=none"
+        else
+          echo "detached_from=${detached_from}"
+        fi
+        echo "usb_id={{ requested_usb_id }}"
+        {% if use_address_match %}
+        echo "usb_addr={{ selected_usb_addr }}"
+        {% else %}
+        echo "usb_addr=unspecified"
+        {% endif %}
+        echo "usb_name={{ usb_display_name }}"
+      args:
+        executable: /bin/bash
+      register: usb_detach_result
+      changed_when: "'detached_from=none' not in usb_detach_result.stdout"
+
+    - name: Display result
+      debug:
+        msg: "{{ usb_detach_result.stdout_lines }}"

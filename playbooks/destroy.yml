@@ -1,0 +1,42 @@
+---
+# Destroy a VM
+# Usage:
+#   ansible-playbook playbooks/destroy.yml -e vm_name=claude01
+
+- name: Destroy VM
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name }}"
+    base_image_dir: /var/lib/libvirt/images
+
+  tasks:
+    - name: Check vm_name is provided
+      fail:
+        msg: "vm_name is required. Usage: ansible-playbook destroy.yml -e vm_name=<name>"
+      when: vm_name is not defined or vm_name == ""
+
+    - name: Check if VM exists
+      command: virsh list --all --name
+      register: vm_list
+      changed_when: false
+
+    - name: Destroy VM (force stop)
+      command: virsh destroy {{ vm_name }}
+      when: vm_name in vm_list.stdout_lines
+      ignore_errors: true
+
+    - name: Undefine VM
+      command: virsh undefine {{ vm_name }}
+      when: vm_name in vm_list.stdout_lines
+      ignore_errors: true
+
+    - name: Remove VM directory
+      file:
+        path: "{{ base_image_dir }}/{{ vm_name }}"
+        state: absent
+
+    - name: VM destroyed
+      debug:
+        msg: "VM {{ vm_name }} has been destroyed and files cleaned up."

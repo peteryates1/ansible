@@ -1,0 +1,48 @@
+---
+# Get status of a VM
+# Usage:
+#   ansible-playbook playbooks/status.yml -e vm_name=claude01
+
+- name: VM Status
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name }}"
+    base_image_dir: /var/lib/libvirt/images
+
+  tasks:
+    - name: Check vm_name is provided
+      fail:
+        msg: "vm_name is required. Usage: ansible-playbook status.yml -e vm_name=<name>"
+      when: vm_name is not defined or vm_name == ""
+
+    - name: Get VM state
+      command: virsh domstate {{ vm_name }}
+      register: vm_state
+      changed_when: false
+      ignore_errors: true
+
+    - name: Get VM IP (if running)
+      shell: virsh domifaddr {{ vm_name }} | grep -oP '(\d+\.){3}\d+' | head -1
+      register: vm_ip
+      changed_when: false
+      ignore_errors: true
+      when: vm_state.rc == 0 and 'running' in vm_state.stdout
+
+    - name: Get VM directory info
+      stat:
+        path: "{{ base_image_dir }}/{{ vm_name }}"
+      register: vm_dir
+
+    - name: Display status
+      debug:
+        msg: |
+          VM: {{ vm_name }}
+          State: {{ vm_state.stdout | default('not found') }}
+          IP: {{ vm_ip.stdout | default('N/A') }}
+          Directory: {{ base_image_dir }}/{{ vm_name }}
+          Exists: {{ vm_dir.stat.exists }}
+          {% if vm_ip.stdout | default('') != '' %}
+          SSH: ssh peter@{{ vm_ip.stdout }}
+          {% endif %}

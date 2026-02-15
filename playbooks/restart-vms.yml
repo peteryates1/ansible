@@ -1,0 +1,35 @@
+---
+# Restart VMs to get DHCP leases
+- name: Restart VMs
+  hosts: localhost
+  become: true
+
+  tasks:
+    - name: Get all running VMs
+      command: virsh list --state-running --name
+      register: running_vms
+      changed_when: false
+
+    - name: Display running VMs
+      debug:
+        msg: "Running VMs: {{ running_vms.stdout_lines }}"
+
+    - name: Restart each VM
+      shell: |
+        virsh reboot {{ item }}
+      loop: "{{ running_vms.stdout_lines }}"
+      when: item != ""
+      ignore_errors: true
+
+    - name: Wait for VMs to reboot
+      pause:
+        seconds: 20
+
+    - name: Check DHCP leases
+      command: virsh net-dhcp-leases default
+      register: dhcp_leases
+      changed_when: false
+
+    - name: Display DHCP leases
+      debug:
+        msg: "{{ dhcp_leases.stdout_lines }}"

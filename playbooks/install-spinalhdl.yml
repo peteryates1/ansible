@@ -1,0 +1,406 @@
+---
+# Install Java/Scala/sbt toolchain for SpinalHDL development.
+# Usage:
+#   ansible-playbook playbooks/install-spinalhdl.yml -e vm_name=fpga01
+#
+# Optional overrides:
+#   -e vm_user=peter
+#   -e java_package=openjdk-21-jdk
+#   -e scala_package=scala
+#   -e sbt_version=latest-1.x
+#   -e sbt_fallback_version=1.9.9
+
+- name: Prepare VM SSH target for SpinalHDL toolchain install
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('') }}"
+    requested_vm_user: "{{ vm_user | default('peter') }}"
+    requested_host_ssh_user: "{{ host_ssh_user | default(lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true)) }}"
+    requested_java_package: "{{ java_package | default('openjdk-21-jdk-headless') }}"
+    requested_scala_package: "{{ scala_package | default('scala') }}"
+
+  tasks:
+    - name: Validate vm_name
+      fail:
+        msg: "Usage: ansible-playbook playbooks/install-spinalhdl.yml -e vm_name=<name> [-e vm_user=<user>]"
+      when: requested_vm_name == ''
+
+    - name: Check VM existence
+      command: virsh list --all --name
+      register: vm_list
+      changed_when: false
+
+    - name: Fail when VM does not exist
+      fail:
+        msg: "VM '{{ requested_vm_name }}' does not exist."
+      when: requested_vm_name not in vm_list.stdout_lines
+
+    - name: Check VM state
+      command: virsh domstate {{ requested_vm_name }}
+      register: vm_state
+      changed_when: false
+
+    - name: Start VM if not running
+      command: virsh start {{ requested_vm_name }}
+      when: "'running' not in (vm_state.stdout | lower)"
+      register: vm_started
+      changed_when: vm_started.rc == 0
+
+    - name: Wait for VM boot after start
+      pause:
+        seconds: 10
+      when: vm_started is changed
+
+    - name: Resolve VM IP
+      shell: |
+        set -euo pipefail
+
+        mac="$(virsh -c qemu:///system domiflist '{{ requested_vm_name }}' 2>/dev/null | awk 'NR > 2 && $5 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { print $5; exit }')"
+        ip=""
+
+        if [ -n "$mac" ]; then
+          ip="$(virsh -c qemu:///system net-dhcp-leases default 2>/dev/null | awk -v mac="$mac" '
+            BEGIN { IGNORECASE = 1 }
+            $0 ~ mac {
+              split($5, parts, "/")
+              print parts[1]
+              exit
+            }
+          ')"
+        fi
+
+        if [ -z "$ip" ]; then
+          ip="$(virsh -c qemu:///system domifaddr '{{ requested_vm_name }}' 2>/dev/null | awk '
+            /ipv4/ {
+              split($4, parts, "/")
+              print parts[1]
+              exit
+            }
+          ')"
+        fi
+
+        echo "$ip"
+      args:
+        executable: /bin/bash
+      register: vm_ip
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: vm_ip.stdout != ""
+
+    - name: Resolve SSH identity arguments from host SSH config
+      shell: |
+        set -euo pipefail
+
+        ssh_config="/home/{{ requested_host_ssh_user }}/.ssh/config"
+        if [ -f "$ssh_config" ]; then
+          identity_lines="$(ssh -F "$ssh_config" -G "{{ vm_ip.stdout }}" 2>/dev/null | awk '/^identityfile / { print $2 }')"
+        else
+          identity_lines="$(ssh -G "{{ vm_ip.stdout }}" 2>/dev/null | awk '/^identityfile / { print $2 }')"
+        fi
+
+        printf '%s\n' "$identity_lines" \
+          | sed "s#^~/#/home/{{ requested_host_ssh_user }}/#" \
+          | awk 'NF && !seen[$0]++ { print }' \
+          | while IFS= read -r key; do
+              [ -f "$key" ] || continue
+              case "$key" in
+                *.pub) continue ;;
+              esac
+              printf -- "-o IdentityFile=%s " "$key"
+            done
+      args:
+        executable: /bin/bash
+      register: resolved_identity_args
+      changed_when: false
+
+    - name: Add dynamic SSH target host
+      add_host:
+        name: spinalhdl_target
+        groups: spinalhdl_targets
+        ansible_host: "{{ vm_ip.stdout }}"
+        ansible_user: "{{ requested_vm_user }}"
+        ansible_ssh_common_args: >-
+          {{
+            ((resolved_identity_args.stdout | trim) ~ ' ')
+            if (resolved_identity_args.stdout | trim) != ''
+            else ''
+          }}-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        spinal_java_package: "{{ requested_java_package }}"
+        spinal_scala_package: "{{ requested_scala_package }}"
+        spinal_vm_user: "{{ requested_vm_user }}"
+
+- name: Install Java/Scala/sbt in VM
+  hosts: spinalhdl_targets
+  become: true
+  gather_facts: false
+  vars:
+    requested_sbt_version: "{{ sbt_version | default('latest-1.x') }}"
+    requested_sbt_fallback_version: "{{ sbt_fallback_version | default('1.9.9') }}"
+
+  tasks:
+    - name: Wait for SSH
+      wait_for_connection:
+        timeout: 300
+
+    - name: Install apt prerequisites
+      apt:
+        name:
+          - ca-certificates
+          - curl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install Java and Scala packages
+      apt:
+        name:
+          - "{{ spinal_java_package }}"
+          - "{{ spinal_scala_package }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Fetch sbt launcher metadata from Maven Central
+      uri:
+        url: https://repo1.maven.org/maven2/org/scala-sbt/sbt-launch/maven-metadata.xml
+        method: GET
+        return_content: true
+      register: sbt_metadata
+      changed_when: false
+
+    - name: Parse available sbt launcher versions
+      set_fact:
+        sbt_available_versions: "{{ sbt_metadata.content | regex_findall('<version>([^<]+)</version>') }}"
+        sbt_latest_stable_1x: >-
+          {{
+            (
+              sbt_metadata.content
+              | regex_findall('<version>([^<]+)</version>')
+              | select('match', '^1\\.[0-9]+\\.[0-9]+$')
+              | list
+              | last
+            ) | default('')
+          }}
+
+    - name: Set effective sbt version
+      set_fact:
+        effective_sbt_version: >-
+          {{
+            sbt_latest_stable_1x
+            if requested_sbt_version in ['latest', 'latest-1', 'latest-1.x']
+            else requested_sbt_version
+          }}
+
+    - name: Apply fallback sbt version when latest-1.x could not be parsed
+      set_fact:
+        effective_sbt_version: "{{ requested_sbt_fallback_version }}"
+      when:
+        - requested_sbt_version in ['latest', 'latest-1', 'latest-1.x']
+        - (effective_sbt_version | trim) == ''
+
+    - name: Probe effective sbt launcher URL
+      uri:
+        url: "https://repo1.maven.org/maven2/org/scala-sbt/sbt-launch/{{ effective_sbt_version }}/sbt-launch-{{ effective_sbt_version }}.jar"
+        method: HEAD
+        status_code:
+          - 200
+          - 301
+          - 302
+      register: sbt_launcher_url_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when effective sbt launcher URL is unavailable
+      fail:
+        msg: >-
+          Unable to resolve a downloadable sbt launcher version.
+          Requested sbt_version={{ requested_sbt_version }}.
+          Effective sbt version={{ effective_sbt_version }}.
+          Latest parsed stable 1.x={{ sbt_latest_stable_1x | default('unknown') }}.
+          Fallback version={{ requested_sbt_fallback_version }}.
+          HEAD status={{ sbt_launcher_url_probe.status | default('n/a') }}.
+      when: sbt_launcher_url_probe.status is not defined or sbt_launcher_url_probe.status not in [200, 301, 302]
+
+    - name: Fail when effective sbt version could not be resolved
+      fail:
+        msg: >-
+          Unable to resolve sbt version from Maven metadata.
+          Requested sbt_version={{ requested_sbt_version }}.
+          Latest parsed stable 1.x={{ sbt_latest_stable_1x | default('unknown') }}.
+          Fallback={{ requested_sbt_fallback_version }}.
+      when: effective_sbt_version | trim == ''
+
+    - name: Fail when requested sbt version does not exist in parsed Maven metadata
+      fail:
+        msg: >-
+          Requested sbt_version={{ effective_sbt_version }} was not found in parsed Maven metadata.
+          Latest parsed stable 1.x={{ sbt_latest_stable_1x | default('unknown') }}.
+          Continuing would likely fail.
+      when:
+        - sbt_available_versions | length > 0
+        - effective_sbt_version not in sbt_available_versions
+        - requested_sbt_version not in ['latest', 'latest-1', 'latest-1.x']
+
+    - name: Ensure /opt/sbt exists
+      file:
+        path: /opt/sbt
+        state: directory
+        mode: '0755'
+
+    - name: Download sbt launcher jar from Maven Central
+      get_url:
+        url: "https://repo1.maven.org/maven2/org/scala-sbt/sbt-launch/{{ effective_sbt_version }}/sbt-launch-{{ effective_sbt_version }}.jar"
+        dest: "/opt/sbt/sbt-launch-{{ effective_sbt_version }}.jar"
+        mode: '0644'
+
+    - name: Link active sbt launcher jar
+      file:
+        src: "/opt/sbt/sbt-launch-{{ effective_sbt_version }}.jar"
+        dest: /opt/sbt/sbt-launch.jar
+        state: link
+        force: true
+
+    - name: Install sbt command wrapper
+      copy:
+        dest: /usr/local/bin/sbt
+        mode: '0755'
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          cache_root="${XDG_CACHE_HOME:-$HOME/.cache}"
+          sbt_cache_root="${cache_root}/sbt"
+          sbt_fallback_tmp_dir="${sbt_cache_root}/tmp"
+          sbt_runtime_root="${sbt_cache_root}/runtime"
+          sbt_boot_dir="${sbt_runtime_root}/boot"
+          sbt_global_base="${sbt_runtime_root}/global"
+          sbt_global_staging="${sbt_runtime_root}/staging"
+          sbt_ivy_home="${sbt_runtime_root}/ivy2"
+          sbt_coursier_home="${cache_root}/coursier"
+          selected_tmp_dir="${sbt_fallback_tmp_dir}"
+
+          mkdir -p \
+            "$sbt_fallback_tmp_dir" \
+            "$sbt_runtime_root" \
+            "$sbt_boot_dir" \
+            "$sbt_global_base" \
+            "$sbt_global_staging" \
+            "$sbt_ivy_home" \
+            "$sbt_coursier_home"
+          chmod 700 "$sbt_fallback_tmp_dir" "$sbt_runtime_root" "$sbt_boot_dir" "$sbt_global_base" "$sbt_global_staging" "$sbt_ivy_home" "$sbt_coursier_home" 2>/dev/null || true
+
+          probe_file="$selected_tmp_dir/.sbt-tmp-probe.$$"
+          if ! : > "$probe_file" 2>/dev/null; then
+            echo "Configured sbt temp directory is not writable: $selected_tmp_dir" >&2
+            exit 1
+          fi
+          rm -f "$probe_file"
+
+          if [ "${1:-}" = "--script-version" ] || [ "${1:-}" = "--numeric-version" ]; then
+            echo "{{ effective_sbt_version }}"
+            exit 0
+          fi
+
+          export TMPDIR="$selected_tmp_dir"
+
+          exec java \
+            ${JAVA_OPTS:-} \
+            ${SBT_OPTS:-} \
+            -Duser.home="$HOME" \
+            -Djava.io.tmpdir="$selected_tmp_dir" \
+            -Dsbt.version="{{ effective_sbt_version }}" \
+            -Dsbt.server.autostart=false \
+            -Dsbt.home="$sbt_runtime_root" \
+            -Dsbt.global.base="$sbt_global_base" \
+            -Dsbt.global.staging="$sbt_global_staging" \
+            -Dsbt.boot.directory="$sbt_boot_dir" \
+            -Dsbt.ivy.home="$sbt_ivy_home" \
+            -Dsbt.coursier.home="$sbt_coursier_home" \
+            -jar /opt/sbt/sbt-launch.jar "$@"
+
+    - name: Ensure user target directory is writable for sbt global logging
+      file:
+        path: "/home/{{ spinal_vm_user }}/target"
+        state: directory
+        owner: "{{ spinal_vm_user }}"
+        group: "{{ spinal_vm_user }}"
+        mode: '0755'
+
+    - name: Ensure user target global-logging directory is writable
+      file:
+        path: "/home/{{ spinal_vm_user }}/target/global-logging"
+        state: directory
+        owner: "{{ spinal_vm_user }}"
+        group: "{{ spinal_vm_user }}"
+        mode: '0755'
+
+    - name: Ensure user target task-temp-directory is writable
+      file:
+        path: "/home/{{ spinal_vm_user }}/target/task-temp-directory"
+        state: directory
+        owner: "{{ spinal_vm_user }}"
+        group: "{{ spinal_vm_user }}"
+        mode: '0755'
+
+    - name: Ensure user project directory exists for sbt server metadata
+      file:
+        path: "/home/{{ spinal_vm_user }}/project"
+        state: directory
+        owner: "{{ spinal_vm_user }}"
+        group: "{{ spinal_vm_user }}"
+        mode: '0755'
+
+    - name: Ensure user project target directory is writable
+      file:
+        path: "/home/{{ spinal_vm_user }}/project/target"
+        state: directory
+        owner: "{{ spinal_vm_user }}"
+        group: "{{ spinal_vm_user }}"
+        mode: '0755'
+
+    - name: Check Java version
+      command: java -version
+      register: java_version
+      changed_when: false
+
+    - name: Check Scala version
+      command: scala -version
+      register: scala_version
+      changed_when: false
+
+    - name: Check sbt launcher script version
+      command: sbt --script-version
+      become: true
+      become_user: "{{ spinal_vm_user }}"
+      args:
+        chdir: "/home/{{ spinal_vm_user }}"
+      register: sbt_script_version
+      changed_when: false
+      failed_when: false
+
+    - name: Check sbt numeric version
+      command: sbt --numeric-version
+      become: true
+      become_user: "{{ spinal_vm_user }}"
+      args:
+        chdir: "/home/{{ spinal_vm_user }}"
+      register: sbt_numeric_version
+      changed_when: false
+      failed_when: false
+
+    - name: Display installation summary
+      debug:
+        msg: |
+          Java package: {{ spinal_java_package }}
+          Java version: {{ java_version.stderr_lines | first | default('unknown') }}
+          Scala package: {{ spinal_scala_package }}
+          Scala version: {{ scala_version.stderr_lines | first | default('unknown') }}
+          sbt requested: {{ requested_sbt_version }}
+          sbt installed: {{ effective_sbt_version }}
+          sbt launcher script version: {{ sbt_script_version.stdout | trim if sbt_script_version.rc == 0 else 'unavailable' }}
+          sbt numeric version: {{ sbt_numeric_version.stdout | trim if sbt_numeric_version.rc == 0 else 'unavailable' }}
+          sbt --script-version rc: {{ sbt_script_version.rc }}
+          sbt --numeric-version rc: {{ sbt_numeric_version.rc }}

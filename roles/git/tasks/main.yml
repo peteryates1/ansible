@@ -1,0 +1,3 @@
+---
+# Tasks run after common role (via meta/main.yml dependency)
+# Add any git-specific post-tasks here if needed

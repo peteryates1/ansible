@@ -1,0 +1,31 @@
+---
+# Set up passwordless sudo for libvirt operations
+- name: Setup Sudo
+  hosts: localhost
+  become: true
+
+  vars:
+    user_name: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+  tasks:
+    - name: Add user to libvirt group
+      user:
+        name: "{{ user_name }}"
+        groups: libvirt,libvirt-qemu
+        append: yes
+
+    - name: Create sudoers file for virsh commands
+      copy:
+        content: |
+          # Allow {{ user_name }} to run virsh and ansible-playbook without password
+          {{ user_name }} ALL=(ALL) NOPASSWD: /usr/bin/virsh, /usr/bin/ansible-playbook
+        dest: /etc/sudoers.d/libvirt-{{ user_name }}
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Display instructions
+      debug:
+        msg: |
+          Passwordless sudo configured for virsh and ansible-playbook.
+          You may need to log out and back in for group changes to take effect.
+          Or run: newgrp libvirt

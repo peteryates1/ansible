@@ -1,0 +1,39 @@
+---
+# Wait for DHCP and check status
+- name: Wait for DHCP
+  hosts: localhost
+  become: true
+
+  tasks:
+    - name: Wait 30 more seconds for DHCP
+      pause:
+        seconds: 30
+
+    - name: Check DHCP leases
+      command: virsh net-dhcp-leases default
+      register: dhcp_leases
+      changed_when: false
+
+    - name: Display DHCP leases
+      debug:
+        msg: "{{ dhcp_leases.stdout_lines }}"
+
+    - name: Check recent dnsmasq logs
+      shell: journalctl --since "2 minutes ago" | grep -i "dnsmasq-dhcp" | tail -20
+      register: dnsmasq_log
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display dnsmasq activity
+      debug:
+        msg: "{{ dnsmasq_log.stdout_lines }}"
+      when: dnsmasq_log.stdout_lines is defined and dnsmasq_log.stdout_lines | length > 0
+
+    - name: Check if VMs are actually running
+      command: virsh list --state-running
+      register: running_vms
+      changed_when: false
+
+    - name: Display running VMs
+      debug:
+        msg: "{{ running_vms.stdout_lines }}"

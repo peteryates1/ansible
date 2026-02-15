@@ -1,0 +1,27 @@
+---
+# Add user to libvirt group (one-time setup)
+- name: Add User to Libvirt Group
+  hosts: localhost
+  become: true
+
+  vars:
+    user_name: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+  tasks:
+    - name: Add user to libvirt groups
+      user:
+        name: "{{ user_name }}"
+        groups: libvirt,libvirt-qemu
+        append: yes
+
+    - name: Display instructions
+      debug:
+        msg: |
+          User {{ user_name }} added to libvirt and libvirt-qemu groups.
+
+          To activate group membership, run:
+            newgrp libvirt
+
+          Or log out and back in.
+
+          After that, you can run virsh commands without sudo.

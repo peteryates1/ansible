@@ -1,0 +1,46 @@
+---
+# Fix libvirt default network
+- name: Fix Network
+  hosts: localhost
+  become: true
+
+  tasks:
+    - name: Check virbr0 IP address
+      command: ip addr show virbr0
+      register: virbr0_status
+      changed_when: false
+
+    - name: Display virbr0 status
+      debug:
+        msg: "{{ virbr0_status.stdout_lines }}"
+
+    - name: Destroy default network
+      command: virsh net-destroy default
+      ignore_errors: true
+      register: net_destroy
+
+    - name: Start default network
+      command: virsh net-start default
+      register: net_start
+
+    - name: Wait for network to initialize
+      pause:
+        seconds: 3
+
+    - name: Check virbr0 IP address after restart
+      command: ip addr show virbr0
+      register: virbr0_after
+      changed_when: false
+
+    - name: Display virbr0 after restart
+      debug:
+        msg: "{{ virbr0_after.stdout_lines }}"
+
+    - name: Verify network has IP
+      shell: ip addr show virbr0 | grep "inet "
+      register: virbr0_ip
+      changed_when: false
+
+    - name: Display IP
+      debug:
+        msg: "virbr0 now has IP: {{ virbr0_ip.stdout }}"

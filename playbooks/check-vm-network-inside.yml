@@ -1,0 +1,50 @@
+---
+# Check network interface status inside VM via console log
+- name: Check VM Network Inside
+  hosts: localhost
+  become: true
+
+  vars:
+    vm_name: "{{ vm_name | default('') }}"
+    base_image_dir: /var/lib/libvirt/images
+
+  tasks:
+    - name: Check VM name
+      fail:
+        msg: "Usage: ansible-playbook playbooks/check-vm-network-inside.yml -e vm_name=<name>"
+      when: vm_name == ''
+
+    - name: Check for network errors in console log
+      shell: grep -i "network\|dhcp\|ens3\|eth0" {{ base_image_dir }}/{{ vm_name }}/console.log | tail -50
+      register: network_log
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display network log entries
+      debug:
+        msg: "{{ network_log.stdout_lines }}"
+      when: network_log.rc == 0
+
+    - name: Check dnsmasq log for this VM's MAC
+      shell: |
+        MAC=$(virsh domiflist {{ vm_name }} | awk '/vnet/ {print $5}')
+        journalctl -u libvirtd --since "10 minutes ago" | grep -i "$MAC\|dhcp" | tail -20
+      register: dnsmasq_log
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display dnsmasq log
+      debug:
+        msg: "{{ dnsmasq_log.stdout_lines }}"
+      when: dnsmasq_log.stdout_lines is defined and dnsmasq_log.stdout_lines | length > 0
+
+    - name: Check system journal for network messages
+      shell: journalctl --since "5 minutes ago" | grep -i "dnsmasq\|dhcp" | tail -30
+      register: journal_dhcp
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display journal DHCP messages
+      debug:
+        msg: "{{ journal_dhcp.stdout_lines }}"
+      when: journal_dhcp.stdout_lines is defined and journal_dhcp.stdout_lines | length > 0

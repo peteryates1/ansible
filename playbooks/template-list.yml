@@ -1,0 +1,56 @@
+---
+# List all VM templates
+# Usage: ansible-playbook playbooks/template-list.yml
+
+- name: List VM templates
+  hosts: localhost
+  become: true
+
+  vars:
+    template_dir: /var/lib/libvirt/images/templates
+
+  tasks:
+    - name: Check if template directory exists
+      stat:
+        path: "{{ template_dir }}"
+      register: dir_exists
+
+    - name: No templates found
+      debug:
+        msg: "No templates found. Create one with: ./vm template create common"
+      when: not dir_exists.stat.exists
+
+    - name: List template files
+      find:
+        paths: "{{ template_dir }}"
+        patterns: "*.qcow2"
+      register: templates
+      when: dir_exists.stat.exists
+
+    - name: Display templates
+      shell: |
+        echo ""
+        echo "Templates:"
+        echo "----------------------------------------"
+        cd {{ template_dir }}
+        for f in *.qcow2; do
+          if [ -f "$f" ]; then
+            size=$(du -h "$f" | cut -f1)
+            name=$(basename "$f" .qcow2)
+            printf "  %-25s %s\n" "$name" "$size"
+          fi
+        done
+        echo ""
+      register: template_output
+      changed_when: false
+      when: dir_exists.stat.exists and templates.files | length > 0
+
+    - name: Show output
+      debug:
+        msg: "{{ template_output.stdout_lines }}"
+      when: dir_exists.stat.exists and templates.files | length > 0
+
+    - name: No templates in directory
+      debug:
+        msg: "Template directory exists but no templates found."
+      when: dir_exists.stat.exists and templates.files | length == 0
