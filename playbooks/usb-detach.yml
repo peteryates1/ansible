@@ -3,15 +3,16 @@
 # Usage:
 #   ansible-playbook playbooks/usb-detach.yml \
 #     -e vm_name=claude01 -e usb_id=09fb:6001
-# Disambiguate duplicate IDs:
+# Disambiguate duplicate IDs by name:
+#   ansible-playbook playbooks/usb-detach.yml \
+#     -e vm_name=claude01 -e usb_id=0403:6010 -e usb_name="Alchitry Au V2"
+# Disambiguate duplicate IDs by address:
 #   ansible-playbook playbooks/usb-detach.yml \
 #     -e vm_name=claude01 -e usb_id=0403:6010 -e usb_addr=001:011
 #
 # Detach from any VM:
 #   ansible-playbook playbooks/usb-detach.yml \
 #     -e usb_id=09fb:6001
-# Optional:
-#   -e usb_name="Altera Blaster"
 
 - name: Detach USB Device from VM
   hosts: localhost
@@ -58,15 +59,46 @@
       failed_when: false
       when: requested_usb_addr != ''
 
+    - name: Select USB by name from descriptors
+      shell: |
+        set -euo pipefail
+        needle={{ requested_usb_name | trim | quote }}
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          bus="$(echo "$line" | awk '{print $2}')"
+          dev="$(echo "$line" | awk '{gsub(":", "", $4); print $4}')"
+          dev_path="/dev/bus/usb/${bus}/${dev}"
+          [ -e "$dev_path" ] || continue
+
+          if lsusb -D "$dev_path" -v 2>/dev/null | grep -iF -- "$needle" >/dev/null; then
+            echo "$line"
+          fi
+        done < <(lsusb -d {{ requested_usb_id | quote }})
+      args:
+        executable: /bin/bash
+      register: lsusb_named
+      changed_when: false
+      when: requested_usb_addr == '' and (requested_usb_name | trim) != ''
+
     - name: Fail when specified usb_addr does not match usb_id
       fail:
         msg: "No device for usb_id={{ requested_usb_id }} at usb_addr={{ requested_usb_addr }}. Check `lsusb` output."
       when: requested_usb_addr != '' and lsusb_selected.stdout_lines | length == 0
 
-    - name: Fail when USB ID is ambiguous without usb_addr
+    - name: Fail when usb_name does not match any device
       fail:
-        msg: "Multiple devices match {{ requested_usb_id }}. Pass usb_addr=BBB:DDD from lsusb (example: usb_addr=001:011)."
-      when: requested_usb_addr == '' and lsusb_match.stdout_lines | length > 1
+        msg: "No device for usb_id={{ requested_usb_id }} matched usb_name='{{ requested_usb_name }}'. Check `lsusb` output."
+      when: requested_usb_addr == '' and (requested_usb_name | trim) != '' and lsusb_named.stdout_lines | length == 0
+
+    - name: Fail when usb_name matches multiple devices
+      fail:
+        msg: "usb_name='{{ requested_usb_name }}' matched multiple devices for {{ requested_usb_id }}. Use usb_addr=BBB:DDD to disambiguate."
+      when: requested_usb_addr == '' and (requested_usb_name | trim) != '' and lsusb_named.stdout_lines | length > 1
+
+    - name: Fail when USB ID is ambiguous without usb_addr or usb_name
+      fail:
+        msg: "Multiple devices match {{ requested_usb_id }}. Pass usb_name='...' (recommended) or usb_addr=BBB:DDD from lsusb."
+      when: requested_usb_addr == '' and (requested_usb_name | trim) == '' and lsusb_match.stdout_lines | length > 1
 
     - name: Select effective USB line
       set_fact:
@@ -74,7 +106,10 @@
           {{
             (lsusb_selected.stdout_lines[0]) if requested_usb_addr != '' else
             (
-              (lsusb_match.stdout_lines[0]) if (lsusb_match.stdout_lines | length == 1) else ''
+              (lsusb_named.stdout_lines[0]) if ((requested_usb_name | trim) != '') else
+              (
+                (lsusb_match.stdout_lines[0]) if (lsusb_match.stdout_lines | length == 1) else ''
+              )
             )
           }}
 

@@ -1,0 +1,128 @@
+---
+# Remove stale USB device entries from a VM's persistent config.
+# Checks each attached USB hostdev against lsusb and strips any
+# whose vendor:product is no longer present on the host.
+#
+# Usage:
+#   ansible-playbook playbooks/usb-cleanup.yml -e vm_name=jop01
+
+- name: Remove stale USB devices from VM config
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('') }}"
+
+  tasks:
+    - name: Validate vm_name
+      fail:
+        msg: "Usage: ansible-playbook playbooks/usb-cleanup.yml -e vm_name=<name>"
+      when: requested_vm_name == ''
+
+    - name: Check VM existence
+      command: virsh list --all --name
+      register: vm_list
+      changed_when: false
+
+    - name: Fail when VM does not exist
+      fail:
+        msg: "VM '{{ requested_vm_name }}' does not exist."
+      when: requested_vm_name not in vm_list.stdout_lines
+
+    - name: Remove stale USB hostdev entries
+      shell: |
+        set -euo pipefail
+
+        vm="{{ requested_vm_name }}"
+
+        # Extract USB vendor:product pairs from persistent config
+        pairs="$(virsh dumpxml --inactive "$vm" | awk '
+        /<hostdev[^>]*type=.usb./ { in_usb=1; vendor=""; product="" }
+        in_usb && /vendor id=/ {
+          v=$0; gsub(/.*id=.0x/, "", v); gsub(/[^0-9a-fA-F].*/, "", v); vendor=tolower(v)
+        }
+        in_usb && /product id=/ {
+          p=$0; gsub(/.*id=.0x/, "", p); gsub(/[^0-9a-fA-F].*/, "", p); product=tolower(p)
+        }
+        in_usb && /<\/hostdev>/ {
+          if (vendor != "" && product != "") print vendor ":" product
+          in_usb=0
+        }
+        ')"
+
+        if [ -z "$pairs" ]; then
+          echo "No USB devices attached to $vm."
+          exit 0
+        fi
+
+        # Identify stale devices (not present on host)
+        stale_ids=""
+        present_ids=""
+        while IFS= read -r pair; do
+          [ -z "$pair" ] && continue
+          if [ -n "$(lsusb -d "$pair" 2>/dev/null)" ]; then
+            present_ids="${present_ids}  ${pair} (present)\n"
+          else
+            stale_ids="${stale_ids}${pair}\n"
+            present_ids="${present_ids}  ${pair} (stale)\n"
+          fi
+        done <<< "$pairs"
+
+        if [ -z "$stale_ids" ]; then
+          echo "No stale USB devices found in $vm config."
+          printf '%b' "$present_ids"
+          exit 0
+        fi
+
+        # Strip stale USB hostdev blocks from persistent config
+        xml_file="$(mktemp /tmp/${vm}-usb-cleanup-XXXXXX.xml)"
+        clean_file="$(mktemp /tmp/${vm}-usb-clean-XXXXXX.xml)"
+        trap 'rm -f "$xml_file" "$clean_file"' EXIT
+
+        virsh dumpxml --inactive "$vm" > "$xml_file"
+
+        awk -v stale="$(printf '%b' "$stale_ids")" '
+        BEGIN {
+          n = split(stale, arr, "\n")
+          for (i = 1; i <= n; i++) if (arr[i] != "") is_stale[arr[i]] = 1
+        }
+        /<hostdev[^>]*type=.usb./ {
+          in_usb = 1
+          block = ""
+          vendor = ""
+          product = ""
+        }
+        in_usb {
+          block = block $0 "\n"
+          if (/vendor id=/) {
+            v = $0; gsub(/.*id=.0x/, "", v); gsub(/[^0-9a-fA-F].*/, "", v); vendor = tolower(v)
+          }
+          if (/product id=/) {
+            p = $0; gsub(/.*id=.0x/, "", p); gsub(/[^0-9a-fA-F].*/, "", p); product = tolower(p)
+          }
+          if (/<\/hostdev>/) {
+            key = vendor ":" product
+            if (!(key in is_stale)) {
+              printf "%s", block
+            }
+            in_usb = 0
+          }
+          next
+        }
+        { print }
+        ' "$xml_file" > "$clean_file"
+
+        virsh define "$clean_file" >/dev/null
+
+        echo "Removed stale USB devices from $vm config:"
+        printf '%b' "$stale_ids" | while IFS= read -r id; do
+          [ -n "$id" ] && echo "  $id"
+        done
+      args:
+        executable: /bin/bash
+      register: cleanup_result
+      changed_when: "'Removed stale' in cleanup_result.stdout"
+
+    - name: Display result
+      debug:
+        msg: "{{ cleanup_result.stdout_lines }}"

@@ -9,7 +9,7 @@ It supports:
 - Sharing host directories into VMs via virtiofs/9p.
 - USB device attach/detach flows for FPGA and serial workflows.
 - Git mirror management for shared reference repos.
-- Toolchain installers for SpinalHDL, Alchitry, Arrow USB Blaster, Claude Code, and OpenCode.
+- Toolchain installers for SpinalHDL, Alchitry, Arrow USB Blaster, Claude Code, OpenCode, VS Code, and VSCodium.
 - Automated post-creation setup for complex VM types (`jop-dev`).
 
 ## Repository layout
@@ -126,6 +126,7 @@ USB management:
 ./vm usb-serials
 ./vm usb-attach <vm> <usb_id> [usb_addr] [usb_name]
 ./vm usb-detach <vm|all> <usb_id> [usb_addr] [usb_name]
+./vm usb-cleanup <vm>                # Remove stale USB entries (unplugged devices)
 ```
 
 Git repos (shared read-only into VMs via `/srv/git`):
@@ -144,6 +145,8 @@ Toolchain installers:
 ```bash
 ./vm install-claude <vm> [user]       # Create claude user + install Claude Code
 ./vm install-opencode <vm> [user]    # Create opencode user + install OpenCode
+./vm install-vscode <vm>             # Install Visual Studio Code
+./vm install-codium <vm>             # Install VSCodium
 ./vm install-spinalhdl <vm> [user]   # Java/Scala/sbt (skips Java if already available)
 ./vm install-alchitry <vm> [user]    # Alchitry AU udev rules
 ./vm install-blaster <vm> [user]     # Arrow USB Blaster support (host .so + VM udev/config)
@@ -154,7 +157,7 @@ Toolchain installers:
 ## jop-dev template
 
 The `jop-dev` template builds a MATE desktop VM for FPGA development. It bakes in:
-- MATE desktop with custom panel layout (Quartus 18.1/25.1, Vivado 2025.2, Eclipse, Chrome, Terminal, Caja)
+- MATE desktop with custom panel layout (Quartus 18.1/25.1, Vivado 2025.2, Eclipse, VS Code, VSCodium, Chrome, Terminal, Caja)
 - Claude Code and OpenCode (with claude/opencode users, SSH keypairs)
 - openjdk-21-jdk-headless, scala, sbt
 - Alchitry AU and USB-Blaster udev rules

@@ -101,6 +101,25 @@ extra_runcmd:
     Icon=/opt/eclipse/java-latest-released/eclipse/icon.xpm
     Categories=Development;IDE;
     DESKTOP
+  # Desktop launchers for code editors
+  - |
+    cat > /usr/share/applications/code.desktop << 'DESKTOP'
+    [Desktop Entry]
+    Type=Application
+    Name=VS Code
+    Exec=/usr/bin/code --no-sandbox --unity-launch %F
+    Icon=vscode
+    Categories=Development;IDE;
+    DESKTOP
+  - |
+    cat > /usr/share/applications/vscodium.desktop << 'DESKTOP'
+    [Desktop Entry]
+    Type=Application
+    Name=VSCodium
+    Exec=/usr/bin/codium --no-sandbox --unity-launch %F
+    Icon=vscodium
+    Categories=Development;IDE;
+    DESKTOP
   # Custom MATE panel layout with tool launchers on top panel
   - |
     cat > /usr/share/mate-panel/layouts/jop-dev.layout << 'LAYOUT'
@@ -171,10 +190,22 @@ extra_runcmd:
     launcher-location=/usr/share/applications/eclipse.desktop
     position=9
 
+    [Object launcher-vscode]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/code.desktop
+    position=10
+
+    [Object launcher-vscodium]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/vscodium.desktop
+    position=11
+
     [Object notification-area]
     object-type=applet
     toplevel-id=top-panel
-    position=10
+    position=12
     panel-right-stick=true
     locked=true
     applet-iid=NotificationAreaAppletFactory::NotificationArea

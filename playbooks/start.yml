@@ -16,21 +16,114 @@
         msg: "vm_name is required. Usage: ansible-playbook start.yml -e vm_name=<name>"
       when: vm_name is not defined or vm_name == ""
 
+    - name: Check VM state
+      command: virsh domstate {{ vm_name | quote }}
+      register: vm_state
+      changed_when: false
+
     - name: Start VM
-      command: virsh start {{ vm_name | quote }}
-      register: start_result
-      ignore_errors: true
+      shell: |
+        set -euo pipefail
+
+        vm="{{ vm_name }}"
+
+        if echo "{{ vm_state.stdout | lower }}" | grep -q "running"; then
+          echo "already_running"
+          exit 0
+        fi
+
+        start_out="$(virsh start "$vm" 2>&1)" && {
+          echo "started"
+          exit 0
+        }
+        echo "$start_out" >&2
+
+        if ! echo "$start_out" | grep -qi "Did not find USB device"; then
+          exit 1
+        fi
+
+        xml_file="$(mktemp /tmp/${vm}-domain-XXXXXX.xml)"
+        clean_xml_file="$(mktemp /tmp/${vm}-domain-clean-XXXXXX.xml)"
+        cleanup() {
+          rm -f "$xml_file" "$clean_xml_file"
+        }
+        trap cleanup EXIT
+
+        virsh dumpxml "$vm" > "$xml_file"
+        awk '
+          BEGIN { skip=0 }
+          /<hostdev[^>]*type=.usb./ { skip=1 }
+          !skip { print }
+          skip && /<\/hostdev>/ { skip=0 }
+        ' "$xml_file" > "$clean_xml_file"
+
+        if cmp -s "$xml_file" "$clean_xml_file"; then
+          echo "Failed to start VM and no removable USB hostdev blocks were found." >&2
+          exit 1
+        fi
+
+        virsh define "$clean_xml_file" >/dev/null
+        retry_out="$(virsh start "$vm" 2>&1)" && {
+          echo "started_after_usb_cleanup"
+          exit 0
+        }
+        echo "$retry_out" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: vm_started
+      changed_when: "'started' in vm_started.stdout"
 
     - name: Wait for VM to boot
       pause:
         seconds: 10
-      when: start_result.rc == 0
+      when: vm_started is changed
 
-    - name: Get VM IP address
-      shell: virsh domifaddr {{ vm_name | quote }} | grep -oP '(\d+\.){3}\d+' | head -1
+    - name: Resolve VM IP
+      shell: |
+        set -euo pipefail
+
+        mac="$(virsh -c qemu:///system domiflist '{{ vm_name }}' 2>/dev/null | awk 'NR > 2 && $5 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { print $5; exit }')"
+        ip=""
+
+        if [ -n "$mac" ]; then
+          ip="$(virsh -c qemu:///system net-dhcp-leases default 2>/dev/null | awk -v mac="$mac" '
+            BEGIN { IGNORECASE = 1 }
+            $0 ~ mac {
+              split($5, parts, "/")
+              print parts[1]
+              exit
+            }
+          ')"
+          if [ -z "$ip" ]; then
+            ip="$(virsh -c qemu:///system net-dumpxml default 2>/dev/null | awk -v mac="$mac" '
+              BEGIN { IGNORECASE = 1 }
+              $0 ~ mac && /ip=/ {
+                gsub(/.*ip=["\047]/, "")
+                gsub(/["\047].*/, "")
+                print
+                exit
+              }
+            ')"
+          fi
+        fi
+
+        if [ -z "$ip" ]; then
+          ip="$(virsh -c qemu:///system domifaddr '{{ vm_name }}' 2>/dev/null | awk '
+            /ipv4/ {
+              split($4, parts, "/")
+              print parts[1]
+              exit
+            }
+          ')"
+        fi
+
+        echo "$ip"
+      args:
+        executable: /bin/bash
       register: vm_ip
       changed_when: false
-      retries: 6
+      retries: 12
       delay: 5
       until: vm_ip.stdout != ""
 

@@ -22,11 +22,14 @@
 #   ./vm usb-attach fpga01 0403:6010 001:011 "Arrow Blaster"        # Attach specific duplicate USB ID
 #   ./vm usb-detach all 09fb:6001 "Altera Blaster"                  # Detach USB device from all VMs
 #   ./vm usb-detach fpga01 0403:6010 001:011 "Arrow Blaster"        # Detach specific duplicate USB ID
+#   ./vm usb-cleanup jop01              # Remove stale USB entries (unplugged devices)
 #   ./vm install-blaster jop [user]     # Install Arrow USB Blaster support in VM
 #   ./vm install-alchitry jop [user]   # Install Alchitry AU udev rules in VM
 #   ./vm install-spinalhdl fpga01 [user]  # Install Java/Scala/sbt toolchain in VM
 #   ./vm install-claude jop01 [user]     # Install Claude Code (creates claude user)
 #   ./vm install-opencode jop01 [user]   # Install OpenCode (creates opencode user)
+#   ./vm install-vscode jop01            # Install Visual Studio Code
+#   ./vm install-codium jop01            # Install VSCodium
 #   ./vm resize-disk jop 64G              # Resize VM disk and grow guest filesystem
 #   ./vm set-passwd jop peter              # Set login password for user (for xrdp)
 #   ./vm share-dir jop /opt/xilinx/2025.2                     # Share host dir into VM (same mount point)
@@ -495,6 +498,15 @@ case "$ACTION" in
             fi
         fi
         ;;
+    usb-cleanup)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 usb-cleanup <vm_name>"
+            echo "Removes stale USB device entries from VM config."
+            echo "Use after physically unplugging USB devices."
+            exit 1
+        fi
+        run_playbook usb-cleanup -e "vm_name=$VM_NAME"
+        ;;
     install-blaster)
         if [ -z "$VM_NAME" ]; then
             echo "Usage: $0 install-blaster <vm_name> [vm_user]"
@@ -544,6 +556,22 @@ case "$ACTION" in
         fi
         INSTALL_USER="${ARG3:-peter}"
         run_playbook install-opencode -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        ;;
+    install-vscode)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 install-vscode <vm_name>"
+            echo "Installs Visual Studio Code via Microsoft apt repo."
+            exit 1
+        fi
+        run_playbook install-vscode -e "vm_name=$VM_NAME"
+        ;;
+    install-codium)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 install-codium <vm_name>"
+            echo "Installs VSCodium via apt repo."
+            exit 1
+        fi
+        run_playbook install-codium -e "vm_name=$VM_NAME"
         ;;
     resize-disk)
         if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
@@ -768,11 +796,14 @@ case "$ACTION" in
         echo "  usb-serials            List USB serial ports and mapped USB identity"
         echo "  usb-attach <name> <usb_id> [usb_addr] [usb_name]  Attach USB device to VM (auto handoff)"
         echo "  usb-detach <name|all> <usb_id> [usb_addr] [usb_name]  Detach USB device"
+        echo "  usb-cleanup <name>    Remove stale USB entries (unplugged devices)"
         echo "  install-blaster <name> [user]  Install Arrow USB Blaster support in VM"
         echo "  install-alchitry <name> [user] Install Alchitry AU udev rules in VM"
         echo "  install-spinalhdl <name> [user]  Install Java/Scala/sbt toolchain in VM"
         echo "  install-claude <name> [user]   Install Claude Code (creates claude user)"
         echo "  install-opencode <name> [user] Install OpenCode (creates opencode user)"
+        echo "  install-vscode <name>         Install Visual Studio Code"
+        echo "  install-codium <name>          Install VSCodium"
         echo "  resize-disk <name> <size>  Resize VM disk and grow guest filesystem"
         echo "  set-passwd <name> <user>   Set login password for user (for xrdp)"
         echo "  share-dir <name> <host_dir> [mount_point]  Share host dir into VM (read-only)"
