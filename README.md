@@ -125,7 +125,7 @@ USB management:
 ./vm usb-list
 ./vm usb-serials
 ./vm usb-attach <vm> <usb_id> [usb_addr] [usb_name]
-./vm usb-detach <vm|all> <usb_id> [usb_addr] [usb_name]
+./vm usb-detach [vm] <usb_id> [usb_addr] [usb_name]
 ./vm usb-cleanup <vm>                # Remove stale USB entries (unplugged devices)
 ```
 

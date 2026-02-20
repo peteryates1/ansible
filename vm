@@ -20,8 +20,8 @@
 #   ./vm usb-attach claude01 09fb:6001 "Altera Blaster"             # Attach unique USB device
 #   ./vm usb-attach jop 0403:6010 "Arrow USB Blaster TEI0050"       # Attach duplicate ID by name
 #   ./vm usb-attach fpga01 0403:6010 001:011 "Arrow Blaster"        # Attach specific duplicate USB ID
-#   ./vm usb-detach all 09fb:6001 "Altera Blaster"                  # Detach USB device from all VMs
-#   ./vm usb-detach fpga01 0403:6010 001:011 "Arrow Blaster"        # Detach specific duplicate USB ID
+#   ./vm usb-detach 09fb:6001 "Altera Blaster"                      # Detach USB device from all VMs
+#   ./vm usb-detach fpga01 0403:6010 001:011 "Arrow Blaster"        # Detach from specific VM
 #   ./vm usb-cleanup jop01              # Remove stale USB entries (unplugged devices)
 #   ./vm install-blaster jop [user]     # Install Arrow USB Blaster support in VM
 #   ./vm install-alchitry jop [user]   # Install Alchitry AU udev rules in VM
@@ -451,22 +451,35 @@ case "$ACTION" in
         fi
         ;;
     usb-detach)
-        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
-            echo "Usage: $0 usb-detach <vm_name|all> <usb_id> [usb_addr] [usb_name]"
+        # If first arg looks like a USB ID (vvvv:pppp), treat as: usb-detach <usb_id> [usb_name]
+        # defaulting to detach from all VMs
+        if [[ "$VM_NAME" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+            USB_ADDR=""
+            if [[ "$ARG3" =~ ^[0-9]{1,3}:[0-9]{1,3}$ ]]; then
+                USB_ADDR="$ARG3"
+                USB_NAME="${*:4}"
+            else
+                USB_NAME="${*:3}"
+            fi
+            ARG3="$VM_NAME"
+            VM_NAME="all"
+        elif [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 usb-detach [vm_name] <usb_id> [usb_addr] [usb_name]"
             echo "usb_id format: vvvv:pppp (copy from lsusb)"
-            echo "usb_addr format: BBB:DDD from lsusb Bus/Device (for duplicate IDs)"
+            echo "Omit vm_name to detach from all VMs."
             echo "Examples:"
-            echo "  $0 usb-detach all 09fb:6001 \"Altera Blaster\""
+            echo "  $0 usb-detach 09fb:6001 \"Altera Blaster\""
             echo "  $0 usb-detach claude01 09fb:6001"
             echo "  $0 usb-detach fpga01 0403:6010 001:011 \"Arrow Blaster\""
             exit 1
-        fi
-        USB_ADDR=""
-        if [[ "$ARG4" =~ ^[0-9]{1,3}:[0-9]{1,3}$ ]]; then
-            USB_ADDR="$ARG4"
-            USB_NAME="${*:5}"
         else
-            USB_NAME="${*:4}"
+            USB_ADDR=""
+            if [[ "$ARG4" =~ ^[0-9]{1,3}:[0-9]{1,3}$ ]]; then
+                USB_ADDR="$ARG4"
+                USB_NAME="${*:5}"
+            else
+                USB_NAME="${*:4}"
+            fi
         fi
         if [ "$VM_NAME" = "all" ]; then
             if [ -n "$USB_NAME" ]; then
@@ -795,7 +808,7 @@ case "$ACTION" in
         echo "  usb-list               List host USB devices (ID, iManufacturer, iProduct)"
         echo "  usb-serials            List USB serial ports and mapped USB identity"
         echo "  usb-attach <name> <usb_id> [usb_addr] [usb_name]  Attach USB device to VM (auto handoff)"
-        echo "  usb-detach <name|all> <usb_id> [usb_addr] [usb_name]  Detach USB device"
+        echo "  usb-detach [name] <usb_id> [usb_addr] [usb_name]  Detach USB device (default: all VMs)"
         echo "  usb-cleanup <name>    Remove stale USB entries (unplugged devices)"
         echo "  install-blaster <name> [user]  Install Arrow USB Blaster support in VM"
         echo "  install-alchitry <name> [user] Install Alchitry AU udev rules in VM"
@@ -843,8 +856,8 @@ case "$ACTION" in
         echo "  $0 usb-attach claude01 09fb:6001 \"Altera Blaster\""
         echo "  $0 usb-attach jop 0403:6010 \"Arrow USB Blaster TEI0050\""
         echo "  $0 usb-attach fpga01 0403:6010 001:011 \"Arrow Blaster\""
-        echo "  $0 usb-detach all 09fb:6001 \"Altera Blaster\""
-        echo "  $0 usb-detach fpga01 0403:6010 001:011 \"Arrow Blaster\""
+        echo "  $0 usb-detach 09fb:6001 \"Altera Blaster\""
+        echo "  $0 usb-detach fpga01 0403:6010 \"Arrow USB Blaster TEI0050\""
         echo "  $0 install-blaster jop"
         echo "  $0 install-alchitry jop"
         echo "  $0 install-spinalhdl fpga01"
