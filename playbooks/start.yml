@@ -17,7 +17,7 @@
       when: vm_name is not defined or vm_name == ""
 
     - name: Start VM
-      command: virsh start {{ vm_name }}
+      command: virsh start {{ vm_name | quote }}
       register: start_result
       ignore_errors: true
 
@@ -27,7 +27,7 @@
       when: start_result.rc == 0
 
     - name: Get VM IP address
-      shell: virsh domifaddr {{ vm_name }} | grep -oP '(\d+\.){3}\d+' | head -1
+      shell: virsh domifaddr {{ vm_name | quote }} | grep -oP '(\d+\.){3}\d+' | head -1
       register: vm_ip
       changed_when: false
       retries: 6

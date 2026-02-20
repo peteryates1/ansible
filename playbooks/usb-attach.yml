@@ -45,7 +45,7 @@
         usb_product: "0x{{ requested_usb_id.split(':')[1] }}"
 
     - name: Find matching USB device on host
-      command: lsusb -d {{ requested_usb_id }}
+      command: lsusb -d {{ requested_usb_id | quote }}
       register: lsusb_match
       changed_when: false
       failed_when: false
@@ -56,7 +56,7 @@
       when: lsusb_match.stdout_lines | length == 0
 
     - name: Select USB by explicit bus:device
-      command: lsusb -s {{ requested_usb_addr }} -d {{ requested_usb_id }}
+      command: lsusb -s {{ requested_usb_addr | quote }} -d {{ requested_usb_id | quote }}
       register: lsusb_selected
       changed_when: false
       failed_when: false
@@ -76,7 +76,7 @@
           if lsusb -D "$dev_path" -v 2>/dev/null | grep -iF -- "$needle" >/dev/null; then
             echo "$line"
           fi
-        done < <(lsusb -d {{ requested_usb_id }})
+        done < <(lsusb -d {{ requested_usb_id | quote }})
       args:
         executable: /bin/bash
       register: lsusb_named

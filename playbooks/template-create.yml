@@ -165,11 +165,11 @@
     - name: Clean up existing builder VM if present
       block:
         - name: Destroy running builder VM
-          command: virsh destroy {{ builder_name }}
+          command: virsh destroy {{ builder_name | quote }}
           ignore_errors: true
 
         - name: Undefine existing builder VM
-          command: virsh undefine {{ builder_name }}
+          command: virsh undefine {{ builder_name | quote }}
           ignore_errors: true
       when: builder_name in existing_vms.stdout_lines
 
@@ -192,19 +192,19 @@
     - name: Wait for cloud-init to complete (checking console log)
       shell: |
         for i in $(seq 1 120); do
-          if grep -q "Cloud-init.*finished" {{ builder_dir }}/console.log 2>/dev/null; then
+          if grep -q "Cloud-init.*finished" "{{ builder_dir }}/console.log" 2>/dev/null; then
             echo "Cloud-init completed"
             exit 0
           fi
-          if grep -q "final_message" {{ builder_dir }}/console.log 2>/dev/null; then
+          if grep -q "final_message" "{{ builder_dir }}/console.log" 2>/dev/null; then
             echo "Cloud-init completed (final message found)"
             exit 0
           fi
-          if grep -q "boot stage final" {{ builder_dir }}/console.log 2>/dev/null; then
+          if grep -q "boot stage final" "{{ builder_dir }}/console.log" 2>/dev/null; then
             echo "Cloud-init completed (boot stage final)"
             exit 0
           fi
-          if grep -q "VM setup complete" {{ builder_dir }}/console.log 2>/dev/null; then
+          if grep -q "VM setup complete" "{{ builder_dir }}/console.log" 2>/dev/null; then
             echo "Cloud-init completed (VM setup complete)"
             exit 0
           fi
@@ -220,21 +220,21 @@
         msg: "{{ cloud_init_wait.stdout }}"
 
     - name: Shutdown builder VM gracefully
-      command: virsh shutdown {{ builder_name }}
+      command: virsh shutdown {{ builder_name | quote }}
       register: shutdown_result
       ignore_errors: true
 
     - name: Wait for VM to shut down
       shell: |
         for i in $(seq 1 30); do
-          if ! virsh list --state-running | grep -q "{{ builder_name }}"; then
+          if ! virsh list --state-running | grep -q {{ builder_name | quote }}; then
             echo "VM shut down"
             exit 0
           fi
           sleep 2
         done
         echo "Forcing shutdown"
-        virsh destroy {{ builder_name }} || true
+        virsh destroy {{ builder_name | quote }} || true
       changed_when: false
 
     - name: Ensure template image uses generic kernel and has usbutils
@@ -278,7 +278,7 @@
         {{ template_output }}
 
     - name: Undefine builder VM
-      command: virsh undefine {{ builder_name }}
+      command: virsh undefine {{ builder_name | quote }}
       ignore_errors: true
 
     - name: Clean up builder directory

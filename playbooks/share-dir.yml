@@ -194,7 +194,7 @@
           }}
 
     - name: Check VM state
-      command: virsh domstate {{ requested_vm_name }}
+      command: virsh domstate {{ requested_vm_name | quote }}
       register: vm_state
       changed_when: false
 
@@ -247,14 +247,14 @@
       changed_when: "'started' in vm_started.stdout"
 
     - name: Shutdown running VM to apply filesystem device config
-      command: virsh shutdown {{ requested_vm_name }}
+      command: virsh shutdown {{ requested_vm_name | quote }}
       when: "'running' in (vm_state.stdout | lower) and share_reboot_required"
       register: vm_shutdown
       changed_when: vm_shutdown.rc == 0
 
     - name: Wait for VM to power off
       shell: |
-        state="$(virsh domstate {{ requested_vm_name }} | tr '[:upper:]' '[:lower:]')"
+        state="$(virsh domstate {{ requested_vm_name | quote }} | tr '[:upper:]' '[:lower:]')"
         if echo "$state" | grep -q "shut off"; then
           exit 0
         fi
@@ -482,7 +482,7 @@
       changed_when: "'added_to_fstab' in fstab_result.stdout"
 
     - name: Verify mount
-      command: df -h {{ share_mount_point }}
+      command: df -h {{ share_mount_point | quote }}
       register: df_result
       changed_when: false
 

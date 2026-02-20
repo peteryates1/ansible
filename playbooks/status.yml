@@ -18,13 +18,13 @@
       when: vm_name is not defined or vm_name == ""
 
     - name: Get VM state
-      command: virsh domstate {{ vm_name }}
+      command: virsh domstate {{ vm_name | quote }}
       register: vm_state
       changed_when: false
       ignore_errors: true
 
     - name: Get VM IP (if running)
-      shell: virsh domifaddr {{ vm_name }} | grep -oP '(\d+\.){3}\d+' | head -1
+      shell: virsh domifaddr {{ vm_name | quote }} | grep -oP '(\d+\.){3}\d+' | head -1
       register: vm_ip
       changed_when: false
       ignore_errors: true

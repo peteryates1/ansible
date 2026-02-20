@@ -10,7 +10,7 @@
 
   tasks:
     - name: List ISO contents
-      shell: isoinfo -l -i {{ base_image_dir }}/{{ vm_name }}/cloud-init.iso
+      shell: isoinfo -l -i "{{ base_image_dir }}/{{ vm_name }}/cloud-init.iso"
       register: iso_contents
       changed_when: false
 
@@ -19,7 +19,7 @@
         msg: "{{ iso_contents.stdout_lines }}"
 
     - name: Extract network-config from ISO
-      shell: isoinfo -i {{ base_image_dir }}/{{ vm_name }}/cloud-init.iso -x /NETWORK-CONFIG. > /tmp/network-config.txt 2>&1 || true
+      shell: isoinfo -i "{{ base_image_dir }}/{{ vm_name }}/cloud-init.iso" -x /NETWORK-CONFIG. > /tmp/network-config.txt 2>&1 || true
       changed_when: false
 
     - name: Display network-config

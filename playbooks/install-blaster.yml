@@ -70,7 +70,7 @@
       when: requested_vm_name not in vm_list.stdout_lines
 
     - name: Check VM state
-      command: virsh domstate {{ requested_vm_name }}
+      command: virsh domstate {{ requested_vm_name | quote }}
       register: vm_state
       changed_when: false
 

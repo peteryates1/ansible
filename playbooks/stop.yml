@@ -17,7 +17,7 @@
       when: vm_name is not defined or vm_name == ""
 
     - name: Shutdown VM (graceful)
-      command: virsh shutdown {{ vm_name }}
+      command: virsh shutdown {{ vm_name | quote }}
       register: stop_result
       ignore_errors: true
 

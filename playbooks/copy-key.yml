@@ -23,12 +23,12 @@
       when: src_vm is not defined or dest_vm is not defined
 
     - name: Get source VM IP
-      shell: virsh domifaddr {{ src_vm }} | grep -oP '(\d+\.){3}\d+' | head -1
+      shell: virsh domifaddr {{ src_vm | quote }} | grep -oP '(\d+\.){3}\d+' | head -1
       register: src_ip
       changed_when: false
 
     - name: Get destination VM IP
-      shell: virsh domifaddr {{ dest_vm }} | grep -oP '(\d+\.){3}\d+' | head -1
+      shell: virsh domifaddr {{ dest_vm | quote }} | grep -oP '(\d+\.){3}\d+' | head -1
       register: dest_ip
       changed_when: false
 

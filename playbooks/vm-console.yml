@@ -15,7 +15,7 @@
 
     - name: Run ip link show via console
       shell: |
-        virsh console {{ vm_name }} --force <<'EOF' || true
+        virsh console {{ vm_name | quote }} --force <<'EOF' || true
 
         root
         ip link show

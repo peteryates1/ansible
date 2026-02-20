@@ -32,7 +32,7 @@
         echo ""
         echo "Templates:"
         echo "----------------------------------------"
-        cd {{ template_dir }}
+        cd {{ template_dir | quote }}
         for f in *.qcow2; do
           if [ -f "$f" ]; then
             size=$(du -h "$f" | cut -f1)

@@ -16,7 +16,7 @@
 
     - name: Restart each VM
       shell: |
-        virsh reboot {{ item }}
+        virsh reboot {{ item | quote }}
       loop: "{{ running_vms.stdout_lines }}"
       when: item != ""
       ignore_errors: true

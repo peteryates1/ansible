@@ -46,13 +46,13 @@
         usb_product: "0x{{ requested_usb_id.split(':')[1] }}"
 
     - name: Find matching USB devices on host
-      command: lsusb -d {{ requested_usb_id }}
+      command: lsusb -d {{ requested_usb_id | quote }}
       register: lsusb_match
       changed_when: false
       failed_when: false
 
     - name: Find matching USB device on host (optional)
-      command: lsusb -s {{ requested_usb_addr }} -d {{ requested_usb_id }}
+      command: lsusb -s {{ requested_usb_addr | quote }} -d {{ requested_usb_id | quote }}
       register: lsusb_selected
       changed_when: false
       failed_when: false

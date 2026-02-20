@@ -15,7 +15,7 @@
       when: vm_name == ''
 
     - name: Check for network errors in console log
-      shell: grep -i "network\|dhcp\|ens3\|eth0" {{ base_image_dir }}/{{ vm_name }}/console.log | tail -50
+      shell: grep -i "network\|dhcp\|ens3\|eth0" "{{ base_image_dir }}/{{ vm_name }}/console.log" | tail -50
       register: network_log
       changed_when: false
       ignore_errors: true
@@ -27,7 +27,7 @@
 
     - name: Check dnsmasq log for this VM's MAC
       shell: |
-        MAC=$(virsh domiflist {{ vm_name }} | awk '/vnet/ {print $5}')
+        MAC=$(virsh domiflist {{ vm_name | quote }} | awk '/vnet/ {print $5}')
         journalctl -u libvirtd --since "10 minutes ago" | grep -i "$MAC\|dhcp" | tail -20
       register: dnsmasq_log
       changed_when: false

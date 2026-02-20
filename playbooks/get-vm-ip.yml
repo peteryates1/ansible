@@ -14,7 +14,7 @@
       when: vm_name == ''
 
     - name: Get VM MAC address
-      shell: virsh domiflist {{ vm_name }} | awk '/vnet/ {print $5}'
+      shell: virsh domiflist {{ vm_name | quote }} | awk '/vnet/ {print $5}'
       register: vm_mac
       changed_when: false
 
@@ -32,7 +32,7 @@
         msg: "{{ dhcp_leases.stdout_lines }}"
 
     - name: Find VM IP from DHCP leases by MAC
-      shell: virsh net-dhcp-leases default | grep -i "{{ vm_mac.stdout }}" | awk '{print $5}' | cut -d'/' -f1
+      shell: virsh net-dhcp-leases default | grep -i {{ vm_mac.stdout | quote }} | awk '{print $5}' | cut -d'/' -f1
       register: vm_ip_from_dhcp
       changed_when: false
       when: vm_mac.stdout != ""

@@ -23,12 +23,12 @@
       changed_when: false
 
     - name: Destroy VM (force stop)
-      command: virsh destroy {{ vm_name }}
+      command: virsh destroy {{ vm_name | quote }}
       when: vm_name in vm_list.stdout_lines
       ignore_errors: true
 
     - name: Undefine VM
-      command: virsh undefine {{ vm_name }}
+      command: virsh undefine {{ vm_name | quote }}
       when: vm_name in vm_list.stdout_lines
       ignore_errors: true
 

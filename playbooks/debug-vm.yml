@@ -17,7 +17,7 @@
       when: vm_name == ''
 
     - name: Check VM status
-      command: virsh domstate {{ vm_name }}
+      command: virsh domstate {{ vm_name | quote }}
       register: vm_state
       changed_when: false
       ignore_errors: true
@@ -27,13 +27,13 @@
         msg: "VM {{ vm_name }} state: {{ vm_state.stdout }}"
 
     - name: Get VM network interfaces
-      command: virsh domifaddr {{ vm_name }} --source agent
+      command: virsh domifaddr {{ vm_name | quote }} --source agent
       register: vm_net_agent
       changed_when: false
       ignore_errors: true
 
     - name: Get VM network from DHCP
-      command: virsh domifaddr {{ vm_name }} --source lease
+      command: virsh domifaddr {{ vm_name | quote }} --source lease
       register: vm_net_lease
       changed_when: false
       ignore_errors: true
@@ -58,7 +58,7 @@
         msg: "{{ dhcp_leases.stdout_lines }}"
 
     - name: Check console log (last 30 lines)
-      shell: tail -30 {{ base_image_dir }}/{{ vm_name }}/console.log
+      shell: tail -30 "{{ base_image_dir }}/{{ vm_name }}/console.log"
       register: console_log
       changed_when: false
       ignore_errors: true
