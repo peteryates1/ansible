@@ -67,7 +67,8 @@ newgrp libvirt
 
 ```bash
 ./vm create git01 git
-./vm create jop01 jop-dev        # Auto-runs setup (shares host dirs, installs blaster .so)
+./vm create jop01 jop-dev            # Auto-runs setup (shares host dirs, installs blaster .so)
+./vm create jop02 jop-dev 16384 8    # Override: 16G RAM, 8 vCPUs
 ```
 
 3. Install Claude Code / OpenCode on any VM:
@@ -91,7 +92,7 @@ newgrp libvirt
 
 ```bash
 ./vm help
-./vm create <name> <type>
+./vm create <name> <type> [memory_mb] [vcpus]
 ./vm destroy <name>
 ./vm start <name>
 ./vm stop <name>
@@ -114,6 +115,7 @@ Sharing and setup:
 
 ```bash
 ./vm share-dir <vm> <host_dir> [mount_point]   # Share host dir into VM (read-only, virtiofs/9p)
+./vm mount-shares <vm>                          # Restart VM and mount all attached shares
 ./vm setup <vm> <type>                          # Post-creation setup (types: jop-dev)
 ```
 
@@ -157,7 +159,9 @@ The `jop-dev` template builds a MATE desktop VM for FPGA development. It bakes i
 - Arrow USB Blaster config, libpng12 (Quartus 18.1), legacy ncurses/tinfo symlinks (Vivado)
 - Google Chrome, xrdp, locale support
 
-After `./vm create jop01 jop-dev`, setup auto-runs to share host directories and install the host-side Arrow Blaster `.so`.
+After `./vm create jop01 jop-dev`, setup auto-runs to share host directories (batched with a single VM restart) and install the host-side Arrow Blaster `.so`. Memory and vCPUs can be overridden per-VM: `./vm create jop02 jop-dev 16384 8`.
+
+Each VM gets a static DHCP reservation on create (removed on destroy) so IPs remain stable across restarts.
 
 Prerequisites on host:
 - `/opt/altera` (Quartus 18.1 and/or 25.1)
@@ -170,6 +174,7 @@ Prerequisites on host:
 
 ## Configuration notes
 
+- Memory and vCPU defaults are set per role in `roles/<type>/vars/main.yml` and can be overridden at create time.
 - Global defaults live in `inventory/hosts.yml`.
 - Template types are auto-discovered from subdirectories under `roles/`.
 - Cloud-init guest user naming is defined in:
@@ -187,5 +192,7 @@ ansible-playbook playbooks/create.yml -e vm_name=claude01 -e vm_role=claude
 ansible-playbook playbooks/template-create.yml -e template_type=common
 ansible-playbook playbooks/usb-attach.yml -e vm_name=claude01 -e usb_id=09fb:6001
 ansible-playbook playbooks/share-dir.yml -e vm_name=jop01 -e host_dir=/opt/xilinx
+ansible-playbook playbooks/share-dir.yml -e vm_name=jop01 -e host_dir=/opt/xilinx -e config_only=true
+ansible-playbook playbooks/mount-shares.yml -e vm_name=jop01
 ```
 
