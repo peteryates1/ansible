@@ -26,8 +26,10 @@
 #   ./vm install-blaster jop [user]     # Install Arrow USB Blaster support in VM
 #   ./vm install-alchitry jop [user]   # Install Alchitry AU udev rules in VM
 #   ./vm install-spinalhdl fpga01 [user]  # Install Java/Scala/sbt toolchain in VM
-#   ./vm install-claude jop01 [user]     # Install Claude Code (creates claude user)
-#   ./vm install-opencode jop01 [user]   # Install OpenCode (creates opencode user)
+#   ./vm install-claude jop01             # Install Claude Code (creates claude user)
+#   ./vm install-claude jop01 peter      # Install Claude Code for existing user
+#   ./vm install-opencode jop01          # Install OpenCode (creates opencode user)
+#   ./vm install-opencode jop01 peter    # Install OpenCode for existing user
 #   ./vm install-vscode jop01            # Install Visual Studio Code
 #   ./vm install-codium jop01            # Install VSCodium
 #   ./vm resize-disk jop 64G              # Resize VM disk and grow guest filesystem
@@ -552,23 +554,29 @@ case "$ACTION" in
         ;;
     install-claude)
         if [ -z "$VM_NAME" ]; then
-            echo "Usage: $0 install-claude <vm_name> [vm_user]"
-            echo "Creates claude user, generates SSH keypair, installs Claude Code."
-            echo "Defaults: vm_user=peter"
+            echo "Usage: $0 install-claude <vm_name> [user]"
+            echo "Installs Claude Code. Default: creates dedicated claude user."
+            echo "Specify user to install for an existing user instead."
             exit 1
         fi
-        INSTALL_USER="${ARG3:-peter}"
-        run_playbook install-claude -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        if [ -n "$ARG3" ]; then
+            run_playbook install-claude -e "vm_name=$VM_NAME" -e "claude_user=$ARG3" -e "create_user=false"
+        else
+            run_playbook install-claude -e "vm_name=$VM_NAME"
+        fi
         ;;
     install-opencode)
         if [ -z "$VM_NAME" ]; then
-            echo "Usage: $0 install-opencode <vm_name> [vm_user]"
-            echo "Creates opencode user, generates SSH keypair, installs OpenCode."
-            echo "Defaults: vm_user=peter"
+            echo "Usage: $0 install-opencode <vm_name> [user]"
+            echo "Installs OpenCode. Default: creates dedicated opencode user."
+            echo "Specify user to install for an existing user instead."
             exit 1
         fi
-        INSTALL_USER="${ARG3:-peter}"
-        run_playbook install-opencode -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        if [ -n "$ARG3" ]; then
+            run_playbook install-opencode -e "vm_name=$VM_NAME" -e "opencode_user=$ARG3" -e "create_user=false"
+        else
+            run_playbook install-opencode -e "vm_name=$VM_NAME"
+        fi
         ;;
     install-vscode)
         if [ -z "$VM_NAME" ]; then
@@ -813,8 +821,8 @@ case "$ACTION" in
         echo "  install-blaster <name> [user]  Install Arrow USB Blaster support in VM"
         echo "  install-alchitry <name> [user] Install Alchitry AU udev rules in VM"
         echo "  install-spinalhdl <name> [user]  Install Java/Scala/sbt toolchain in VM"
-        echo "  install-claude <name> [user]   Install Claude Code (creates claude user)"
-        echo "  install-opencode <name> [user] Install OpenCode (creates opencode user)"
+        echo "  install-claude <name> [user]   Install Claude Code (default: creates claude user)"
+        echo "  install-opencode <name> [user] Install OpenCode (default: creates opencode user)"
         echo "  install-vscode <name>         Install Visual Studio Code"
         echo "  install-codium <name>          Install VSCodium"
         echo "  resize-disk <name> <size>  Resize VM disk and grow guest filesystem"

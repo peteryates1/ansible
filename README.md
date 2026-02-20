@@ -143,8 +143,8 @@ In VMs, browse `/srv/git/<repo>` directly or `git clone /srv/git/<repo> ~/<repo>
 Toolchain installers:
 
 ```bash
-./vm install-claude <vm> [user]       # Create claude user + install Claude Code
-./vm install-opencode <vm> [user]    # Create opencode user + install OpenCode
+./vm install-claude <vm> [user]       # Install Claude Code (default: creates claude user)
+./vm install-opencode <vm> [user]    # Install OpenCode (default: creates opencode user)
 ./vm install-vscode <vm>             # Install Visual Studio Code
 ./vm install-codium <vm>             # Install VSCodium
 ./vm install-spinalhdl <vm> [user]   # Java/Scala/sbt (skips Java if already available)

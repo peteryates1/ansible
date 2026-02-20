@@ -1,14 +1,15 @@
 ---
 # Install OpenCode in a VM.
-# Creates the opencode user (if needed), generates an SSH keypair, and
-# installs OpenCode.
+# By default creates a dedicated opencode user with SSH keypair.
+# Specify opencode_user to install for an existing user instead.
 #
 # Usage:
 #   ansible-playbook playbooks/install-opencode.yml -e vm_name=jop01
+#   ansible-playbook playbooks/install-opencode.yml -e vm_name=jop01 -e opencode_user=peter
 #
 # Optional overrides:
-#   -e vm_user=peter
-#   -e opencode_user=opencode
+#   -e vm_user=peter            (SSH login user)
+#   -e opencode_user=opencode   (install target; default creates dedicated user)
 
 - name: Prepare VM SSH target
   hosts: localhost
@@ -18,6 +19,7 @@
     requested_vm_name: "{{ vm_name | default('') }}"
     requested_vm_user: "{{ vm_user | default('peter') }}"
     requested_opencode_user: "{{ opencode_user | default('opencode') }}"
+    requested_create_user: "{{ create_user | default(true) | bool }}"
     requested_host_ssh_user: "{{ host_ssh_user | default(lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true)) }}"
     requested_ssh_authorized_keys_file: "{{ ssh_authorized_keys_file | default('/home/' ~ requested_host_ssh_user ~ '/.ssh/authorized_keys') }}"
 
@@ -172,6 +174,8 @@
     - name: Load SSH authorized keys from host
       set_fact:
         host_ssh_authorized_keys: "{{ lookup('file', requested_ssh_authorized_keys_file).split('\n') | select | list }}"
+      when: requested_create_user
+      no_log: true
 
     - name: Add dynamic SSH target host
       add_host:
@@ -186,7 +190,8 @@
             else ''
           }}-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
         target_opencode_user: "{{ requested_opencode_user }}"
-        target_ssh_authorized_keys: "{{ host_ssh_authorized_keys }}"
+        target_create_user: "{{ requested_create_user }}"
+        target_ssh_authorized_keys: "{{ host_ssh_authorized_keys | default([]) }}"
 
 - name: Install OpenCode in VM
   hosts: opencode_targets
@@ -205,6 +210,7 @@
         groups: sudo,dialout,plugdev
         append: true
         create_home: true
+      when: target_create_user | bool
 
     - name: Allow opencode user passwordless sudo
       copy:
@@ -212,6 +218,7 @@
         content: "{{ target_opencode_user }} ALL=(ALL) NOPASSWD:ALL\n"
         mode: '0440'
         validate: 'visudo -cf %s'
+      when: target_create_user | bool
 
     - name: Set up SSH authorized keys for opencode user
       authorized_key:
@@ -219,6 +226,7 @@
         key: "{{ item }}"
         state: present
       loop: "{{ target_ssh_authorized_keys }}"
+      when: target_create_user | bool
 
     - name: Generate SSH keypair for opencode user
       shell: |
@@ -237,6 +245,7 @@
         executable: /bin/bash
       register: keygen_result
       changed_when: "'generated' in keygen_result.stdout"
+      when: target_create_user | bool
 
     - name: Install OpenCode
       shell: |
