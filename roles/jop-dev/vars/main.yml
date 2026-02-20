@@ -299,3 +299,34 @@ extra_runcmd:
       -jar /opt/sbt/sbt-launch.jar "$@"
     SBT_WRAPPER
     chmod +x /usr/local/bin/sbt
+  # Generate SSH keypairs and install Claude Code + OpenCode
+  - |
+    sudo -u claude bash << 'KEYSCRIPT'
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
+    if [ ! -f ~/.ssh/id_ed25519 ]; then
+      ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -C "claude@$(hostname)"
+    fi
+    KEYSCRIPT
+  - |
+    sudo -u claude bash << 'SCRIPT'
+    set -e
+    cd /home/claude
+    curl -fsSL https://claude.ai/install.sh | bash
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    SCRIPT
+  - |
+    sudo -u opencode bash << 'KEYSCRIPT'
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
+    if [ ! -f ~/.ssh/id_ed25519 ]; then
+      ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -C "opencode@$(hostname)"
+    fi
+    KEYSCRIPT
+  - |
+    sudo -u opencode bash << 'SCRIPT'
+    set -e
+    cd /home/opencode
+    curl -fsSL https://opencode.ai/install | bash
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    SCRIPT

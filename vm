@@ -2,9 +2,8 @@
 # VM management wrapper script
 # Usage:
 #   ./vm create common01 common     # Create common base VM
-#   ./vm create claude01 claude     # Create Claude Code VM
 #   ./vm create git01 git           # Create Git Server VM
-#   ./vm create opencode01 opencode # Create OpenCode VM
+#   ./vm create jop01 jop-dev       # Create JOP FPGA dev VM (auto-runs setup)
 #   ./vm destroy claude01           # Destroy VM
 #   ./vm start claude01             # Start VM
 #   ./vm stop claude01              # Stop VM
@@ -25,6 +24,8 @@
 #   ./vm install-blaster jop [user]     # Install Arrow USB Blaster support in VM
 #   ./vm install-alchitry jop [user]   # Install Alchitry AU udev rules in VM
 #   ./vm install-spinalhdl fpga01 [user]  # Install Java/Scala/sbt toolchain in VM
+#   ./vm install-claude jop01 [user]     # Install Claude Code (creates claude user)
+#   ./vm install-opencode jop01 [user]   # Install OpenCode (creates opencode user)
 #   ./vm resize-disk jop 64G              # Resize VM disk and grow guest filesystem
 #   ./vm set-passwd jop peter              # Set login password for user (for xrdp)
 #   ./vm share-dir jop /opt/xilinx/2025.2                     # Share host dir into VM (same mount point)
@@ -37,9 +38,7 @@
 #
 # Template commands:
 #   ./vm template create common     # Create hardened base template
-#   ./vm template create claude     # Create Claude Code template
 #   ./vm template create git        # Create Git Server template
-#   ./vm template create opencode   # Create OpenCode template
 #   ./vm template create jop-dev    # Create JOP FPGA development template
 #   ./vm template list              # List all templates
 #   ./vm template destroy common    # Remove a template
@@ -245,13 +244,11 @@ case "$ACTION" in
             create)
                 if [ -z "$TEMPLATE_TYPE" ]; then
                     echo "Usage: $0 template create <type>"
-                    echo "Types: common, claude, git, opencode, mate, jop-dev"
+                    echo "Types: common, git, mate, jop-dev"
                     echo ""
                     echo "Template hierarchy:"
                     echo "  1. ./vm template create common    # Base hardened template"
-                    echo "  2. ./vm template create claude    # Requires common"
                     echo "  2. ./vm template create git       # Requires common"
-                    echo "  2. ./vm template create opencode  # Requires common"
                     echo "  2. ./vm template create mate      # Requires common (MATE desktop + xrdp)"
                     echo "  2. ./vm template create jop-dev   # Requires common (MATE + FPGA dev tools)"
                     exit 1
@@ -264,18 +261,18 @@ case "$ACTION" in
             destroy)
                 if [ -z "$TEMPLATE_TYPE" ]; then
                     echo "Usage: $0 template destroy <type>"
-                    echo "Types: common, claude, git, opencode, mate, jop-dev"
+                    echo "Types: common, git, mate, jop-dev"
                     exit 1
                 fi
                 run_playbook template-destroy -e "template_type=$TEMPLATE_TYPE"
                 ;;
             *)
                 echo "Template subcommands:"
-                echo "  $0 template create <type>   Create a template (common, claude, git, opencode, mate, jop-dev)"
+                echo "  $0 template create <type>   Create a template (common, git, mate, jop-dev)"
                 echo "  $0 template list            List all templates"
                 echo "  $0 template destroy <type>  Remove a template"
                 echo ""
-                echo "Create templates in order: common -> claude/git/opencode/mate/jop-dev"
+                echo "Create templates in order: common -> git/mate/jop-dev"
                 exit 1
                 ;;
         esac
@@ -284,7 +281,7 @@ case "$ACTION" in
         if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
             echo "Usage: $0 create <vm_name> <type>"
             echo "Types: $(vm_role_types)"
-            echo "Example: $0 create claude01 claude"
+            echo "Example: $0 create jop01 jop-dev"
             exit 1
         fi
         run_playbook create -e "vm_name=$VM_NAME" -e "vm_role=$ARG3"
@@ -501,6 +498,26 @@ case "$ACTION" in
         fi
         INSTALL_USER="${ARG3:-peter}"
         run_playbook install-spinalhdl -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        ;;
+    install-claude)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 install-claude <vm_name> [vm_user]"
+            echo "Creates claude user, generates SSH keypair, installs Claude Code."
+            echo "Defaults: vm_user=peter"
+            exit 1
+        fi
+        INSTALL_USER="${ARG3:-peter}"
+        run_playbook install-claude -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        ;;
+    install-opencode)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 install-opencode <vm_name> [vm_user]"
+            echo "Creates opencode user, generates SSH keypair, installs OpenCode."
+            echo "Defaults: vm_user=peter"
+            exit 1
+        fi
+        INSTALL_USER="${ARG3:-peter}"
+        run_playbook install-opencode -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
         ;;
     resize-disk)
         if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
@@ -727,6 +744,8 @@ case "$ACTION" in
         echo "  install-blaster <name> [user]  Install Arrow USB Blaster support in VM"
         echo "  install-alchitry <name> [user] Install Alchitry AU udev rules in VM"
         echo "  install-spinalhdl <name> [user]  Install Java/Scala/sbt toolchain in VM"
+        echo "  install-claude <name> [user]   Install Claude Code (creates claude user)"
+        echo "  install-opencode <name> [user] Install OpenCode (creates opencode user)"
         echo "  resize-disk <name> <size>  Resize VM disk and grow guest filesystem"
         echo "  set-passwd <name> <user>   Set login password for user (for xrdp)"
         echo "  share-dir <name> <host_dir> [mount_point]  Share host dir into VM (read-only)"
@@ -739,22 +758,20 @@ case "$ACTION" in
         echo "  mirror remove <repo>   Remove a mirror"
         echo ""
         echo "Template Commands:"
-        echo "  template create <type> Create a template (common, claude, git, opencode, mate, jop-dev)"
+        echo "  template create <type> Create a template (common, git, mate, jop-dev)"
         echo "  template list          List all templates"
         echo "  template destroy <type> Remove a template"
         echo ""
         echo "Template Workflow (faster VM creation):"
         echo "  1. $0 template create common    # Hardened base"
-        echo "  2. $0 template create claude    # Claude Code template"
         echo "  2. $0 template create git       # Git server template"
-        echo "  2. $0 template create opencode  # OpenCode template"
         echo "  2. $0 template create mate      # MATE desktop + xrdp template"
         echo "  2. $0 template create jop-dev   # MATE + FPGA dev tools template"
-        echo "  3. $0 create claude01 claude    # Fast instance from template"
+        echo "  3. $0 create jop01 jop-dev      # Fast instance from template"
         echo ""
         echo "Examples:"
         echo "  $0 create common01 common"
-        echo "  $0 create claude01 claude"
+        echo "  $0 create jop01 jop-dev"
         echo "  $0 create git01 git"
         echo "  $0 ip claude01"
         echo "  $0 ssh claude01"

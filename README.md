@@ -4,12 +4,12 @@ This repository automates local KVM/libvirt VM workflows with Ansible and a `./v
 
 It supports:
 - Creating reusable Debian-based templates with security hardening.
-- Creating VMs from templates for role types: `common`, `claude`, `git`, `opencode`, `mate`, `jop-dev`.
+- Creating VMs from templates for role types: `common`, `git`, `mate`, `jop-dev`.
 - VM lifecycle operations (`start`, `stop`, `status`, `destroy`, `list`, `ip`, `ssh`).
 - Sharing host directories into VMs via virtiofs/9p.
 - USB device attach/detach flows for FPGA and serial workflows.
 - Git mirror management for shared reference repos.
-- Toolchain installers for SpinalHDL, Alchitry, and Arrow USB Blaster.
+- Toolchain installers for SpinalHDL, Alchitry, Arrow USB Blaster, Claude Code, and OpenCode.
 - Automated post-creation setup for complex VM types (`jop-dev`).
 
 ## Repository layout
@@ -58,9 +58,7 @@ newgrp libvirt
 
 ```bash
 ./vm template create common      # Base hardened template (required first)
-./vm template create claude      # Claude Code VM
 ./vm template create git         # Git server VM
-./vm template create opencode    # OpenCode VM
 ./vm template create mate        # MATE desktop + xrdp
 ./vm template create jop-dev     # MATE + FPGA dev tools (Quartus/Vivado/Eclipse launchers, sbt, udev rules)
 ```
@@ -68,19 +66,25 @@ newgrp libvirt
 2. Create VMs from templates:
 
 ```bash
-./vm create claude01 claude
 ./vm create git01 git
 ./vm create jop01 jop-dev        # Auto-runs setup (shares host dirs, installs blaster .so)
 ```
 
-3. Check and connect:
+3. Install Claude Code / OpenCode on any VM:
+
+```bash
+./vm install-claude jop01        # Creates claude user, installs Claude Code
+./vm install-opencode jop01      # Creates opencode user, installs OpenCode
+```
+
+4. Check and connect:
 
 ```bash
 ./vm list
-./vm status claude01
-./vm ip claude01
-./vm ssh claude01
-./vm ssh claude01 claude -- whoami
+./vm status jop01
+./vm ip jop01
+./vm ssh jop01
+./vm ssh jop01 claude -- claude --version
 ```
 
 ## Common commands
@@ -101,7 +105,7 @@ newgrp libvirt
 Template management:
 
 ```bash
-./vm template create <type>      # Types: common, claude, git, opencode, mate, jop-dev
+./vm template create <type>      # Types: common, git, mate, jop-dev (auto-discovered from roles/)
 ./vm template list
 ./vm template destroy <type>
 ```
@@ -134,17 +138,20 @@ Git mirrors (shared reference repos for fast clones in VMs):
 Toolchain installers:
 
 ```bash
-./vm install-spinalhdl <vm> [user]    # Java/Scala/sbt (skips Java if already available)
-./vm install-alchitry <vm> [user]     # Alchitry AU udev rules
-./vm install-blaster <vm> [user]      # Arrow USB Blaster support (host .so + VM udev/config)
-./vm resize-disk <vm> <size>          # Resize VM disk and grow guest filesystem
-./vm set-passwd <vm> <user>           # Set login password (for xrdp)
+./vm install-claude <vm> [user]       # Create claude user + install Claude Code
+./vm install-opencode <vm> [user]    # Create opencode user + install OpenCode
+./vm install-spinalhdl <vm> [user]   # Java/Scala/sbt (skips Java if already available)
+./vm install-alchitry <vm> [user]    # Alchitry AU udev rules
+./vm install-blaster <vm> [user]     # Arrow USB Blaster support (host .so + VM udev/config)
+./vm resize-disk <vm> <size>         # Resize VM disk and grow guest filesystem
+./vm set-passwd <vm> <user>          # Set login password (for xrdp)
 ```
 
 ## jop-dev template
 
 The `jop-dev` template builds a MATE desktop VM for FPGA development. It bakes in:
 - MATE desktop with custom panel layout (Quartus 18.1/25.1, Vivado 2025.2, Eclipse, Chrome, Terminal, Caja)
+- Claude Code and OpenCode (with claude/opencode users, SSH keypairs)
 - openjdk-21-jdk-headless, scala, sbt
 - Alchitry AU and USB-Blaster udev rules
 - Arrow USB Blaster config, libpng12 (Quartus 18.1), legacy ncurses/tinfo symlinks (Vivado)

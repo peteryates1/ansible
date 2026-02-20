@@ -1,3 +1,0 @@
----
-# Tasks run after common role (via meta/main.yml dependency)
-# Add any opencode-specific post-tasks here if needed
