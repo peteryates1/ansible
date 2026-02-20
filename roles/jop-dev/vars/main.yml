@@ -1,0 +1,301 @@
+# JOP FPGA development VM with MATE desktop, Quartus/Vivado/Eclipse launchers, and shared JDK
+vm_type: "jop-dev"
+vm_disk_size: "64G"
+
+extra_users:
+  - name: claude
+    sudo: true
+    shell: /bin/bash
+    ssh_keys: true
+  - name: opencode
+    sudo: true
+    shell: /bin/bash
+    ssh_keys: true
+
+extra_packages:
+  - mate-desktop-environment
+  - mate-desktop-environment-extras
+  - xrdp
+  - dbus-x11
+  - openjdk-21-jdk-headless
+  - scala
+  - locales
+
+extra_runcmd:
+  # Configure MATE as the xrdp session for all users
+  - echo "mate-session" > /etc/skel/.xsession
+  - |
+    for home_dir in /home/*; do
+      [ -d "$home_dir" ] || continue
+      user="$(basename "$home_dir")"
+      echo "mate-session" > "$home_dir/.xsession"
+      chown "$user:$user" "$home_dir/.xsession"
+    done
+  # Enable xrdp
+  - systemctl enable xrdp
+  # Allow RDP from private libvirt network (access via SSH tunnel from host)
+  - ufw allow from 192.168.122.0/24 to any port 3389 proto tcp
+  # Generate en_US.UTF-8 locale (required by Vivado and other tools)
+  - sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen
+  # Legacy library symlinks for Vivado (not packaged in Debian 13)
+  - |
+    ln -sf libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
+    ln -sf libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5
+    ldconfig
+  # Install Google Chrome
+  - |
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+      | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+      > /etc/apt/sources.list.d/google-chrome.list
+    apt-get update
+    apt-get install -y google-chrome-stable
+  # Set JAVA_HOME and PATH for JDK 21 (shared from host or apt-installed)
+  - |
+    cat > /etc/profile.d/jdk-shared.sh << 'PROFILE'
+    if [ -d /opt/jdk-21 ]; then
+      export JAVA_HOME=/opt/jdk-21
+    elif [ -d /usr/lib/jvm/java-21-openjdk-amd64 ]; then
+      export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+    fi
+    if [ -n "$JAVA_HOME" ]; then
+      export PATH="$JAVA_HOME/bin:$PATH"
+    fi
+    PROFILE
+  # Desktop launchers for FPGA tools
+  - |
+    cat > /usr/share/applications/quartus-25.1.desktop << 'DESKTOP'
+    [Desktop Entry]
+    Type=Application
+    Name=Quartus 25.1
+    Exec=/opt/altera/25.1/quartus/bin/quartus --64bit
+    Icon=/opt/altera/25.1/quartus/adm/quartusii.png
+    Categories=Development;Electronics;
+    DESKTOP
+  - |
+    cat > /usr/share/applications/quartus-18.1.desktop << 'DESKTOP'
+    [Desktop Entry]
+    Type=Application
+    Name=Quartus 18.1
+    Exec=/opt/altera/18.1/quartus/bin/quartus --64bit
+    Icon=/opt/altera/18.1/quartus/adm/quartusii.png
+    Categories=Development;Electronics;
+    DESKTOP
+  - |
+    cat > /usr/share/applications/vivado-2025.2.desktop << 'DESKTOP'
+    [Desktop Entry]
+    Type=Application
+    Name=Vivado 2025.2
+    Exec=/opt/xilinx/2025.2/Vivado/bin/vivado
+    Icon=/opt/xilinx/2025.2/Vivado/doc/images/vivado_logo.png
+    Categories=Development;Electronics;
+    DESKTOP
+  - |
+    cat > /usr/share/applications/eclipse.desktop << 'DESKTOP'
+    [Desktop Entry]
+    Type=Application
+    Name=Eclipse
+    Exec=/opt/eclipse/java-latest-released/eclipse/eclipse
+    Icon=/opt/eclipse/java-latest-released/eclipse/icon.xpm
+    Categories=Development;IDE;
+    DESKTOP
+  # Custom MATE panel layout with tool launchers on top panel
+  - |
+    cat > /usr/share/mate-panel/layouts/jop-dev.layout << 'LAYOUT'
+    [Toplevel top-panel]
+    expand=true
+    orientation=top
+    size=24
+
+    [Toplevel bottom-panel]
+    expand=true
+    orientation=bottom
+    size=24
+
+    [Object menu-bar]
+    object-type=menu-bar
+    toplevel-id=top-panel
+    position=0
+
+    [Object separator-1]
+    object-type=separator
+    toplevel-id=top-panel
+    position=1
+
+    [Object launcher-terminal]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/mate-terminal.desktop
+    position=2
+
+    [Object launcher-caja]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/caja.desktop
+    position=3
+
+    [Object launcher-chrome]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/google-chrome.desktop
+    position=4
+
+    [Object separator-2]
+    object-type=separator
+    toplevel-id=top-panel
+    position=5
+
+    [Object launcher-quartus25]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/quartus-25.1.desktop
+    position=6
+
+    [Object launcher-quartus18]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/quartus-18.1.desktop
+    position=7
+
+    [Object launcher-vivado]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/vivado-2025.2.desktop
+    position=8
+
+    [Object launcher-eclipse]
+    object-type=launcher
+    toplevel-id=top-panel
+    launcher-location=/usr/share/applications/eclipse.desktop
+    position=9
+
+    [Object notification-area]
+    object-type=applet
+    toplevel-id=top-panel
+    position=10
+    panel-right-stick=true
+    locked=true
+    applet-iid=NotificationAreaAppletFactory::NotificationArea
+
+    [Object clock]
+    object-type=applet
+    toplevel-id=top-panel
+    position=0
+    panel-right-stick=true
+    locked=true
+    applet-iid=ClockAppletFactory::ClockApplet
+
+    [Object show-desktop]
+    object-type=applet
+    toplevel-id=bottom-panel
+    position=0
+    locked=true
+    applet-iid=WnckletFactory::ShowDesktopApplet
+
+    [Object window-list]
+    object-type=applet
+    toplevel-id=bottom-panel
+    position=20
+    locked=true
+    applet-iid=WnckletFactory::WindowListApplet
+
+    [Object workspace-switcher]
+    object-type=applet
+    toplevel-id=bottom-panel
+    position=0
+    panel-right-stick=true
+    locked=true
+    applet-iid=WnckletFactory::WorkspaceSwitcherApplet
+    LAYOUT
+  # Set jop-dev panel layout as default for new users via dconf
+  - |
+    mkdir -p /etc/dconf/profile
+    cat > /etc/dconf/profile/user << 'DPROFILE'
+    user-db:user
+    system-db:local
+    DPROFILE
+    mkdir -p /etc/dconf/db/local.d
+    cat > /etc/dconf/db/local.d/00-panel << 'DPANEL'
+    [org/mate/panel/general]
+    default-layout='jop-dev'
+    DPANEL
+    dconf update
+  # Alchitry AU udev rules (FTDI FT2232H)
+  - |
+    cat > /etc/udev/rules.d/99-alchitry.rules << 'UDEV'
+    SUBSYSTEM!="usb", GOTO="ft2232_rules_end"
+    ACTION!="add", GOTO="ft2232_rules_end"
+    ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", MODE="0666", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
+    LABEL="ft2232_rules_end"
+    UDEV
+  # USB-Blaster udev rules (Quartus JTAG programmers)
+  - |
+    cat > /etc/udev/rules.d/51-usb-blaster.rules << 'UDEV'
+    # USB-Blaster
+    SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6001", MODE="0666", GROUP="plugdev"
+    SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6002", MODE="0666", GROUP="plugdev"
+    SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6003", MODE="0666", GROUP="plugdev"
+    # USB-Blaster II
+    SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6010", MODE="0666", GROUP="plugdev"
+    SUBSYSTEM=="usb", ATTR{idVendor}=="09fb", ATTR{idProduct}=="6810", MODE="0666", GROUP="plugdev"
+    UDEV
+  # Install sbt from Maven Central
+  - |
+    SBT_VERSION=$(curl -fsSL https://repo1.maven.org/maven2/org/scala-sbt/sbt-launch/maven-metadata.xml \
+      | grep -oP '<version>\K[^<]+' | grep -E '^1\.[0-9]+\.[0-9]+$' | tail -1)
+    SBT_VERSION=${SBT_VERSION:-1.9.9}
+    mkdir -p /opt/sbt
+    curl -fsSL -o "/opt/sbt/sbt-launch-${SBT_VERSION}.jar" \
+      "https://repo1.maven.org/maven2/org/scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch-${SBT_VERSION}.jar"
+    ln -sf "sbt-launch-${SBT_VERSION}.jar" /opt/sbt/sbt-launch.jar
+    echo "$SBT_VERSION" > /opt/sbt/version
+    cat > /usr/local/bin/sbt << 'SBT_WRAPPER'
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SBT_VERSION="$(cat /opt/sbt/version 2>/dev/null || echo unknown)"
+    cache_root="${XDG_CACHE_HOME:-$HOME/.cache}"
+    sbt_cache_root="${cache_root}/sbt"
+    sbt_fallback_tmp_dir="${sbt_cache_root}/tmp"
+    sbt_runtime_root="${sbt_cache_root}/runtime"
+    sbt_boot_dir="${sbt_runtime_root}/boot"
+    sbt_global_base="${sbt_runtime_root}/global"
+    sbt_global_staging="${sbt_runtime_root}/staging"
+    sbt_ivy_home="${sbt_runtime_root}/ivy2"
+    sbt_coursier_home="${cache_root}/coursier"
+    selected_tmp_dir="${sbt_fallback_tmp_dir}"
+    mkdir -p \
+      "$sbt_fallback_tmp_dir" \
+      "$sbt_runtime_root" \
+      "$sbt_boot_dir" \
+      "$sbt_global_base" \
+      "$sbt_global_staging" \
+      "$sbt_ivy_home" \
+      "$sbt_coursier_home"
+    chmod 700 "$sbt_fallback_tmp_dir" "$sbt_runtime_root" "$sbt_boot_dir" "$sbt_global_base" "$sbt_global_staging" "$sbt_ivy_home" "$sbt_coursier_home" 2>/dev/null || true
+    probe_file="$selected_tmp_dir/.sbt-tmp-probe.$$"
+    if ! : > "$probe_file" 2>/dev/null; then
+      echo "Configured sbt temp directory is not writable: $selected_tmp_dir" >&2
+      exit 1
+    fi
+    rm -f "$probe_file"
+    if [ "${1:-}" = "--script-version" ] || [ "${1:-}" = "--numeric-version" ]; then
+      echo "$SBT_VERSION"
+      exit 0
+    fi
+    export TMPDIR="$selected_tmp_dir"
+    exec java \
+      ${JAVA_OPTS:-} \
+      ${SBT_OPTS:-} \
+      -Duser.home="$HOME" \
+      -Djava.io.tmpdir="$selected_tmp_dir" \
+      -Dsbt.version="$SBT_VERSION" \
+      -Dsbt.server.autostart=false \
+      -Dsbt.home="$sbt_runtime_root" \
+      -Dsbt.global.base="$sbt_global_base" \
+      -Dsbt.global.staging="$sbt_global_staging" \
+      -Dsbt.boot.directory="$sbt_boot_dir" \
+      -Dsbt.ivy.home="$sbt_ivy_home" \
+      -Dsbt.coursier.home="$sbt_coursier_home" \
+      -jar /opt/sbt/sbt-launch.jar "$@"
+    SBT_WRAPPER
+    chmod +x /usr/local/bin/sbt

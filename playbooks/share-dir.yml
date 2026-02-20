@@ -37,6 +37,11 @@
         msg: "Host directory '{{ requested_host_dir }}' does not exist."
       when: not host_dir_stat.stat.exists
 
+    - name: Resolve host directory real path (virt-aa-helper rejects symlinks)
+      command: readlink -f "{{ requested_host_dir }}"
+      register: resolved_host_dir_result
+      changed_when: false
+
     - name: Check VM existence
       command: virsh list --all --name
       register: vm_list
@@ -94,6 +99,8 @@
         }
         trap cleanup EXIT
 
+        resolved_dir="$(readlink -f '{{ requested_host_dir }}')"
+
         attach_share() {
           local fs_type="$1"
           local target_exists_config=0
@@ -102,7 +109,7 @@
             cat > "$xml_file" <<EOF
         <filesystem type='mount' accessmode='passthrough'>
           <driver type='virtiofs'/>
-          <source dir='{{ requested_host_dir }}'/>
+          <source dir='$resolved_dir'/>
           <target dir='{{ requested_share_tag }}'/>
           <readonly/>
         </filesystem>
@@ -110,7 +117,7 @@
           else
             cat > "$xml_file" <<EOF
         <filesystem type='mount' accessmode='passthrough'>
-          <source dir='{{ requested_host_dir }}'/>
+          <source dir='$resolved_dir'/>
           <target dir='{{ requested_share_tag }}'/>
           <readonly/>
         </filesystem>
@@ -170,6 +177,7 @@
         fi
 
         if grep -qi "requires shared memory" "$err_file"; then
+          virsh detach-device "{{ requested_vm_name }}" "$xml_file" --config 2>/dev/null || true
           if attach_share "9p"; then
             echo "$attach_result"
             exit 0
@@ -182,6 +190,34 @@
         executable: /bin/bash
       register: share_attach
       changed_when: "'attached:' in share_attach.stdout"
+
+    - name: Add host directory to AppArmor libvirt abstraction
+      shell: |
+        set -euo pipefail
+
+        aa_file="/etc/apparmor.d/local/abstractions/libvirt-qemu"
+        rule="{{ resolved_host_dir_result.stdout }}/** r,"
+
+        mkdir -p "$(dirname "$aa_file")"
+
+        if [ -f "$aa_file" ] && grep -qF "$rule" "$aa_file"; then
+          echo "already_present"
+          exit 0
+        fi
+
+        echo "  $rule" >> "$aa_file"
+
+        # Reload per-VM AppArmor profiles so they pick up the updated local abstraction
+        if systemctl is-active --quiet apparmor; then
+          for f in /etc/apparmor.d/libvirt/libvirt-*; do
+            [ -f "$f" ] && apparmor_parser -r "$f" 2>/dev/null || true
+          done
+        fi
+        echo "added"
+      args:
+        executable: /bin/bash
+      register: apparmor_result
+      changed_when: "'added' in apparmor_result.stdout"
 
     - name: Determine effective filesystem type
       set_fact:

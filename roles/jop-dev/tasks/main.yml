@@ -1,0 +1,3 @@
+---
+# Tasks run after common role (via meta/main.yml dependency)
+# MATE desktop, desktop launchers, and JDK PATH are installed via cloud-init extra_packages/extra_runcmd

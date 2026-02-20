@@ -29,6 +29,7 @@
 #   ./vm set-passwd jop peter              # Set login password for user (for xrdp)
 #   ./vm share-dir jop /opt/xilinx/2025.2                     # Share host dir into VM (same mount point)
 #   ./vm share-dir jop /opt/xilinx/2025.2 /opt/xilinx/2025.2  # Share host dir with explicit mount point
+#   ./vm setup jop01 jop-dev         # Run post-creation setup (share dirs, install toolchains)
 #   ./vm mirror add https://github.com/user/repo.git          # Mirror a GitHub repo to /srv/git
 #   ./vm mirror list                                           # List all mirrors
 #   ./vm mirror sync [repo]                                    # Fetch updates for all or one mirror
@@ -39,6 +40,7 @@
 #   ./vm template create claude     # Create Claude Code template
 #   ./vm template create git        # Create Git Server template
 #   ./vm template create opencode   # Create OpenCode template
+#   ./vm template create jop-dev    # Create JOP FPGA development template
 #   ./vm template list              # List all templates
 #   ./vm template destroy common    # Remove a template
 
@@ -243,7 +245,7 @@ case "$ACTION" in
             create)
                 if [ -z "$TEMPLATE_TYPE" ]; then
                     echo "Usage: $0 template create <type>"
-                    echo "Types: common, claude, git, opencode, mate"
+                    echo "Types: common, claude, git, opencode, mate, jop-dev"
                     echo ""
                     echo "Template hierarchy:"
                     echo "  1. ./vm template create common    # Base hardened template"
@@ -251,6 +253,7 @@ case "$ACTION" in
                     echo "  2. ./vm template create git       # Requires common"
                     echo "  2. ./vm template create opencode  # Requires common"
                     echo "  2. ./vm template create mate      # Requires common (MATE desktop + xrdp)"
+                    echo "  2. ./vm template create jop-dev   # Requires common (MATE + FPGA dev tools)"
                     exit 1
                 fi
                 run_playbook template-create -e "template_type=$TEMPLATE_TYPE"
@@ -261,18 +264,18 @@ case "$ACTION" in
             destroy)
                 if [ -z "$TEMPLATE_TYPE" ]; then
                     echo "Usage: $0 template destroy <type>"
-                    echo "Types: common, claude, git, opencode, mate"
+                    echo "Types: common, claude, git, opencode, mate, jop-dev"
                     exit 1
                 fi
                 run_playbook template-destroy -e "template_type=$TEMPLATE_TYPE"
                 ;;
             *)
                 echo "Template subcommands:"
-                echo "  $0 template create <type>   Create a template (common, claude, git, opencode, mate)"
+                echo "  $0 template create <type>   Create a template (common, claude, git, opencode, mate, jop-dev)"
                 echo "  $0 template list            List all templates"
                 echo "  $0 template destroy <type>  Remove a template"
                 echo ""
-                echo "Create templates in order: common -> claude/git/opencode/mate"
+                echo "Create templates in order: common -> claude/git/opencode/mate/jop-dev"
                 exit 1
                 ;;
         esac
@@ -285,6 +288,12 @@ case "$ACTION" in
             exit 1
         fi
         run_playbook create -e "vm_name=$VM_NAME" -e "vm_role=$ARG3"
+        # Run post-creation setup for types that need it
+        case "$ARG3" in
+            jop-dev)
+                "$0" setup "$VM_NAME" "$ARG3"
+                ;;
+        esac
         ;;
     destroy)
         if [ -z "$VM_NAME" ]; then
@@ -654,6 +663,48 @@ case "$ACTION" in
                 ;;
         esac
         ;;
+    setup)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 setup <vm_name> <type>"
+            echo "Types: jop-dev"
+            echo ""
+            echo "Runs post-creation setup: shares host directories and installs host-side tools."
+            echo ""
+            echo "For jop-dev, shares /opt/altera, /opt/eclipse, /opt/.p2, /opt/jdk1.6*,"
+            echo "/opt/jdk1.8*, /opt/xilinx, /srv/git into the VM, then installs host-side"
+            echo "Arrow USB Blaster .so. Java, sbt, udev rules, and blaster config are"
+            echo "baked into the template."
+            echo ""
+            echo "Prerequisites:"
+            echo "  mkdir -p /srv/git  (or use: $0 mirror add <url>)"
+            exit 1
+        fi
+        SETUP_TYPE="$ARG3"
+        case "$SETUP_TYPE" in
+            jop-dev)
+                echo "Setting up $VM_NAME as $SETUP_TYPE..."
+                echo ""
+                echo "Sharing host directories..."
+                "$0" share-dir "$VM_NAME" /opt/altera
+                "$0" share-dir "$VM_NAME" /opt/eclipse
+                "$0" share-dir "$VM_NAME" /opt/.p2
+                "$0" share-dir "$VM_NAME" /opt/jdk1.6.0_45
+                "$0" share-dir "$VM_NAME" /opt/jdk1.8.0_202
+                "$0" share-dir "$VM_NAME" /opt/xilinx
+                "$0" share-dir "$VM_NAME" /srv/git
+                echo ""
+                echo "Installing host-side Blaster support..."
+                "$0" install-blaster "$VM_NAME"
+                echo ""
+                echo "Setup complete for $VM_NAME ($SETUP_TYPE)."
+                ;;
+            *)
+                echo "Unknown setup type: $SETUP_TYPE"
+                echo "Supported types: jop-dev"
+                exit 1
+                ;;
+        esac
+        ;;
     help|--help|-h)
         echo "VM Management Tool"
         echo ""
@@ -679,6 +730,7 @@ case "$ACTION" in
         echo "  resize-disk <name> <size>  Resize VM disk and grow guest filesystem"
         echo "  set-passwd <name> <user>   Set login password for user (for xrdp)"
         echo "  share-dir <name> <host_dir> [mount_point]  Share host dir into VM (read-only)"
+        echo "  setup <name> <type>        Run post-creation setup (types: jop-dev)"
         echo ""
         echo "Mirror Commands:"
         echo "  mirror add <git-url>   Mirror a remote repo to /srv/git"
@@ -687,7 +739,7 @@ case "$ACTION" in
         echo "  mirror remove <repo>   Remove a mirror"
         echo ""
         echo "Template Commands:"
-        echo "  template create <type> Create a template (common, claude, git, opencode, mate)"
+        echo "  template create <type> Create a template (common, claude, git, opencode, mate, jop-dev)"
         echo "  template list          List all templates"
         echo "  template destroy <type> Remove a template"
         echo ""
@@ -697,6 +749,7 @@ case "$ACTION" in
         echo "  2. $0 template create git       # Git server template"
         echo "  2. $0 template create opencode  # OpenCode template"
         echo "  2. $0 template create mate      # MATE desktop + xrdp template"
+        echo "  2. $0 template create jop-dev   # MATE + FPGA dev tools template"
         echo "  3. $0 create claude01 claude    # Fast instance from template"
         echo ""
         echo "Examples:"
@@ -722,6 +775,7 @@ case "$ACTION" in
         echo "  $0 resize-disk jop 64G"
         echo "  $0 set-passwd jop claude"
         echo "  $0 share-dir jop /opt/xilinx/2025.2"
+        echo "  $0 setup jop01 jop-dev"
         echo "  $0 mirror add https://github.com/SpinalHDL/SpinalHDL.git"
         echo "  $0 mirror sync"
         echo "  $0 destroy claude01"

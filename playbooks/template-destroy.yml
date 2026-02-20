@@ -11,10 +11,21 @@
     template_dir: /var/lib/libvirt/images/templates
 
   tasks:
+    - name: Discover available role types
+      find:
+        paths: "{{ playbook_dir }}/../roles"
+        file_type: directory
+        recurse: false
+      register: role_dirs
+
+    - name: Set valid template types
+      set_fact:
+        valid_types: "{{ ['common'] + (role_dirs.files | map(attribute='path') | map('basename') | reject('equalto', 'common') | sort | list) }}"
+
     - name: Validate template type
       fail:
-        msg: "Invalid template_type '{{ template_type }}'. Must be: common, claude, git, or opencode"
-      when: template_type not in ['common', 'claude', 'git', 'opencode']
+        msg: "Invalid template_type '{{ template_type }}'. Must be: {{ valid_types | join(', ') }}"
+      when: template_type not in valid_types
 
     - name: Set template path
       set_fact:

@@ -154,10 +154,24 @@
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Install Java and Scala packages
+    - name: Check if Java is already available
+      command: java -version
+      register: java_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Java package
       apt:
         name:
           - "{{ spinal_java_package }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: java_check.rc != 0
+
+    - name: Install Scala package
+      apt:
+        name:
           - "{{ spinal_scala_package }}"
         state: present
         update_cache: true

@@ -6,6 +6,7 @@
 #   ansible-playbook playbooks/template-create.yml -e template_type=git
 #   ansible-playbook playbooks/template-create.yml -e template_type=opencode
 #   ansible-playbook playbooks/template-create.yml -e template_type=mate
+#   ansible-playbook playbooks/template-create.yml -e template_type=jop-dev
 
 - name: Create VM template
   hosts: localhost
@@ -21,10 +22,22 @@
     requested_ssh_authorized_keys_file: "{{ ssh_authorized_keys_file | default('/home/' ~ requested_host_ssh_user ~ '/.ssh/authorized_keys') }}"
 
   tasks:
+    - name: Discover available role types
+      find:
+        paths: "{{ playbook_dir }}/../roles"
+        file_type: directory
+        recurse: false
+      register: role_dirs
+
+    - name: Set valid template types
+      set_fact:
+        role_types: "{{ role_dirs.files | map(attribute='path') | map('basename') | reject('equalto', 'common') | sort | list }}"
+        valid_types: "{{ ['common'] + (role_dirs.files | map(attribute='path') | map('basename') | reject('equalto', 'common') | sort | list) }}"
+
     - name: Validate template type
       fail:
-        msg: "Invalid template_type '{{ template_type }}'. Must be: common, claude, git, opencode, or mate"
-      when: template_type not in ['common', 'claude', 'git', 'opencode', 'mate']
+        msg: "Invalid template_type '{{ template_type }}'. Must be: {{ valid_types | join(', ') }}"
+      when: template_type not in valid_types
 
     - name: Set template file paths
       set_fact:
@@ -55,12 +68,12 @@
       stat:
         path: "{{ common_template }}"
       register: common_exists
-      when: template_type in ['claude', 'git', 'opencode', 'mate']
+      when: template_type in role_types
 
     - name: Fail if common template missing
       fail:
         msg: "common-hardened template required. Create it first: ./vm template create common"
-      when: template_type in ['claude', 'git', 'opencode', 'mate'] and not common_exists.stat.exists
+      when: template_type in role_types and not common_exists.stat.exists
 
     - name: Create template directory
       file:
@@ -82,7 +95,7 @@
     - name: Set backing image for role templates
       set_fact:
         backing_image: "{{ common_template }}"
-      when: template_type in ['claude', 'git', 'opencode', 'mate']
+      when: template_type in role_types
 
     - name: Download base image if needed
       get_url:
@@ -116,7 +129,7 @@
     - name: Include template-specific vars
       include_vars:
         file: "../roles/{{ template_type }}/vars/main.yml"
-      when: template_type in ['claude', 'git', 'opencode', 'mate']
+      when: template_type in role_types
 
     - name: Set common template vars
       set_fact:
@@ -258,6 +271,34 @@
       debug:
         msg: "{{ kernel_customize_result.stdout_lines | default([]) }}"
       when: template_type == 'common' and kernel_customize_result.stdout_lines is defined
+
+    - name: Install libpng12 from local deb (Quartus requires real libpng12 ABI)
+      command:
+        argv:
+          - virt-customize
+          - -a
+          - "{{ builder_dir }}/{{ builder_name }}.qcow2"
+          - --copy-in
+          - /var/lib/libvirt/shared/libpng12-0_1.2.54-1ubuntu1.1_amd64.deb:/tmp
+          - --run-command
+          - dpkg-deb -x /tmp/libpng12-0_1.2.54-1ubuntu1.1_amd64.deb /tmp/libpng12
+          - --run-command
+          - cp /tmp/libpng12/lib/x86_64-linux-gnu/libpng12.so.0* /usr/lib/x86_64-linux-gnu/
+          - --run-command
+          - rm -rf /tmp/libpng12-0_1.2.54-1ubuntu1.1_amd64.deb /tmp/libpng12
+          - --run-command
+          - ldconfig
+      when: template_type == 'jop-dev'
+
+    - name: Install Arrow USB Blaster config into template
+      command:
+        argv:
+          - virt-customize
+          - -a
+          - "{{ builder_dir }}/{{ builder_name }}.qcow2"
+          - --copy-in
+          - /var/lib/libvirt/shared/Arrow_USB_Programmer_2.5.1_linux64/arrow_usb_blaster.conf:/etc
+      when: template_type == 'jop-dev'
 
     - name: Run virt-sysprep to clean template
       command: >
