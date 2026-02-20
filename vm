@@ -29,6 +29,10 @@
 #   ./vm set-passwd jop peter              # Set login password for user (for xrdp)
 #   ./vm share-dir jop /opt/xilinx/2025.2                     # Share host dir into VM (same mount point)
 #   ./vm share-dir jop /opt/xilinx/2025.2 /opt/xilinx/2025.2  # Share host dir with explicit mount point
+#   ./vm mirror add https://github.com/user/repo.git          # Mirror a GitHub repo to /srv/git
+#   ./vm mirror list                                           # List all mirrors
+#   ./vm mirror sync [repo]                                    # Fetch updates for all or one mirror
+#   ./vm mirror remove repo                                    # Remove a mirror
 #
 # Template commands:
 #   ./vm template create common     # Create hardened base template
@@ -537,6 +541,119 @@ case "$ACTION" in
         MOUNT_POINT="${ARG4:-$ARG3}"
         run_playbook share-dir -e "vm_name=$VM_NAME" -e "host_dir=$ARG3" -e "mount_point=$MOUNT_POINT"
         ;;
+    mirror)
+        MIRROR_DIR="/srv/git"
+        MIRROR_ACTION="${VM_NAME:-help}"
+        case "$MIRROR_ACTION" in
+            add)
+                if [ -z "$ARG3" ]; then
+                    echo "Usage: $0 mirror add <git-url>"
+                    echo "Clones a bare mirror of a remote repo into $MIRROR_DIR."
+                    echo "Share into VMs with: $0 share-dir <vm> $MIRROR_DIR"
+                    echo "Then in VM: git clone --reference $MIRROR_DIR/<repo>.git <git-url>"
+                    echo ""
+                    echo "Example: $0 mirror add https://github.com/SpinalHDL/SpinalHDL.git"
+                    exit 1
+                fi
+                REPO_URL="$ARG3"
+                REPO_NAME="$(basename "$REPO_URL")"
+                # Ensure .git suffix
+                case "$REPO_NAME" in
+                    *.git) ;;
+                    *) REPO_NAME="${REPO_NAME}.git" ;;
+                esac
+                if [ -d "$MIRROR_DIR/$REPO_NAME" ]; then
+                    echo "Mirror already exists: $MIRROR_DIR/$REPO_NAME"
+                    echo "Run '$0 mirror sync $REPO_NAME' to update it."
+                    exit 0
+                fi
+                if [ ! -d "$MIRROR_DIR" ]; then
+                    sudo mkdir -p "$MIRROR_DIR"
+                    sudo chown "$(id -un):$(id -gn)" "$MIRROR_DIR"
+                fi
+                echo "Mirroring $REPO_URL -> $MIRROR_DIR/$REPO_NAME ..."
+                git clone --mirror "$REPO_URL" "$MIRROR_DIR/$REPO_NAME"
+                echo "Done. Share into VMs with: $0 share-dir <vm> $MIRROR_DIR"
+                ;;
+            list)
+                if [ ! -d "$MIRROR_DIR" ]; then
+                    echo "No mirrors found. Mirror dir: $MIRROR_DIR"
+                    exit 0
+                fi
+                echo "Git mirrors in $MIRROR_DIR:"
+                echo ""
+                for repo in "$MIRROR_DIR"/*.git; do
+                    [ -d "$repo" ] || continue
+                    name="$(basename "$repo")"
+                    url="$(git -C "$repo" remote get-url origin 2>/dev/null || echo "(no remote)")"
+                    size="$(du -sh "$repo" 2>/dev/null | cut -f1)"
+                    printf "  %-40s %8s  %s\n" "$name" "$size" "$url"
+                done
+                echo ""
+                echo "Share into VMs with: $0 share-dir <vm> $MIRROR_DIR"
+                echo "In VM: git clone --reference $MIRROR_DIR/<repo>.git <git-url>"
+                ;;
+            sync)
+                if [ ! -d "$MIRROR_DIR" ]; then
+                    echo "No mirrors found."
+                    exit 1
+                fi
+                if [ -n "$ARG3" ]; then
+                    REPO_NAME="$ARG3"
+                    case "$REPO_NAME" in
+                        *.git) ;;
+                        *) REPO_NAME="${REPO_NAME}.git" ;;
+                    esac
+                    if [ ! -d "$MIRROR_DIR/$REPO_NAME" ]; then
+                        echo "Mirror not found: $MIRROR_DIR/$REPO_NAME"
+                        exit 1
+                    fi
+                    echo "Syncing $REPO_NAME ..."
+                    git -C "$MIRROR_DIR/$REPO_NAME" fetch --all --prune
+                else
+                    for repo in "$MIRROR_DIR"/*.git; do
+                        [ -d "$repo" ] || continue
+                        name="$(basename "$repo")"
+                        echo "Syncing $name ..."
+                        git -C "$repo" fetch --all --prune
+                    done
+                fi
+                echo "Done."
+                ;;
+            remove)
+                if [ -z "$ARG3" ]; then
+                    echo "Usage: $0 mirror remove <repo-name>"
+                    echo "Example: $0 mirror remove SpinalHDL.git"
+                    exit 1
+                fi
+                REPO_NAME="$ARG3"
+                case "$REPO_NAME" in
+                    *.git) ;;
+                    *) REPO_NAME="${REPO_NAME}.git" ;;
+                esac
+                if [ ! -d "$MIRROR_DIR/$REPO_NAME" ]; then
+                    echo "Mirror not found: $MIRROR_DIR/$REPO_NAME"
+                    exit 1
+                fi
+                echo "Removing mirror: $MIRROR_DIR/$REPO_NAME"
+                rm -rf "$MIRROR_DIR/$REPO_NAME"
+                echo "Done."
+                ;;
+            *)
+                echo "Mirror subcommands:"
+                echo "  $0 mirror add <git-url>      Mirror a remote repo to $MIRROR_DIR"
+                echo "  $0 mirror list               List all mirrors"
+                echo "  $0 mirror sync [repo]        Fetch updates for all or one mirror"
+                echo "  $0 mirror remove <repo>       Remove a mirror"
+                echo ""
+                echo "Workflow:"
+                echo "  $0 mirror add https://github.com/user/repo.git"
+                echo "  $0 share-dir jop $MIRROR_DIR"
+                echo "  # In VM: git clone --reference $MIRROR_DIR/repo.git https://github.com/user/repo.git"
+                exit 1
+                ;;
+        esac
+        ;;
     help|--help|-h)
         echo "VM Management Tool"
         echo ""
@@ -562,6 +679,12 @@ case "$ACTION" in
         echo "  resize-disk <name> <size>  Resize VM disk and grow guest filesystem"
         echo "  set-passwd <name> <user>   Set login password for user (for xrdp)"
         echo "  share-dir <name> <host_dir> [mount_point]  Share host dir into VM (read-only)"
+        echo ""
+        echo "Mirror Commands:"
+        echo "  mirror add <git-url>   Mirror a remote repo to /srv/git"
+        echo "  mirror list            List all mirrors"
+        echo "  mirror sync [repo]     Fetch updates for all or one mirror"
+        echo "  mirror remove <repo>   Remove a mirror"
         echo ""
         echo "Template Commands:"
         echo "  template create <type> Create a template (common, claude, git, opencode, mate)"
@@ -599,6 +722,8 @@ case "$ACTION" in
         echo "  $0 resize-disk jop 64G"
         echo "  $0 set-passwd jop claude"
         echo "  $0 share-dir jop /opt/xilinx/2025.2"
+        echo "  $0 mirror add https://github.com/SpinalHDL/SpinalHDL.git"
+        echo "  $0 mirror sync"
         echo "  $0 destroy claude01"
         ;;
     *)
