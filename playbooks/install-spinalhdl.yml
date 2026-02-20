@@ -69,6 +69,17 @@
               exit
             }
           ')"
+          if [ -z "$ip" ]; then
+            ip="$(virsh -c qemu:///system net-dumpxml default 2>/dev/null | awk -v mac="$mac" '
+              BEGIN { IGNORECASE = 1 }
+              $0 ~ mac && /ip=/ {
+                gsub(/.*ip=["\047]/, "")
+                gsub(/["\047].*/, "")
+                print
+                exit
+              }
+            ')"
+          fi
         fi
 
         if [ -z "$ip" ]; then

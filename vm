@@ -196,6 +196,7 @@ get_vm_ip() {
 
     mac=$(virsh -c qemu:///system domiflist "$vm_name" 2>/dev/null | awk 'NR > 2 && $5 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { print $5; exit }')
     if [ -n "$mac" ]; then
+        # Try DHCP leases first
         ip=$(virsh -c qemu:///system net-dhcp-leases default 2>/dev/null | awk -v mac="$mac" '
             BEGIN { IGNORECASE = 1 }
             $0 ~ mac {
@@ -204,6 +205,18 @@ get_vm_ip() {
                 exit
             }
         ')
+        # Try static DHCP reservations in network XML
+        if [ -z "$ip" ]; then
+            ip=$(virsh -c qemu:///system net-dumpxml default 2>/dev/null | awk -v mac="$mac" '
+                BEGIN { IGNORECASE = 1 }
+                $0 ~ mac && /ip=/ {
+                    gsub(/.*ip=["\047]/, "")
+                    gsub(/["\047].*/, "")
+                    print
+                    exit
+                }
+            ')
+        fi
     fi
 
     if [ -z "$ip" ]; then
