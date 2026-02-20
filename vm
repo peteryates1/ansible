@@ -1,9 +1,10 @@
 #!/bin/bash
 # VM management wrapper script
 # Usage:
-#   ./vm create common01 common     # Create common base VM
-#   ./vm create git01 git           # Create Git Server VM
-#   ./vm create jop01 jop-dev       # Create JOP FPGA dev VM (auto-runs setup)
+#   ./vm create common01 common         # Create common base VM
+#   ./vm create git01 git               # Create Git Server VM
+#   ./vm create jop01 jop-dev           # Create JOP FPGA dev VM (auto-runs setup)
+#   ./vm create jop02 jop-dev 16384 8   # Override: 16G RAM, 8 vCPUs
 #   ./vm destroy claude01           # Destroy VM
 #   ./vm start claude01             # Start VM
 #   ./vm stop claude01              # Stop VM
@@ -279,12 +280,23 @@ case "$ACTION" in
         ;;
     create)
         if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
-            echo "Usage: $0 create <vm_name> <type>"
+            echo "Usage: $0 create <vm_name> <type> [memory_mb] [vcpus]"
             echo "Types: $(vm_role_types)"
-            echo "Example: $0 create jop01 jop-dev"
+            echo "Memory/vCPUs override role defaults (e.g. 8192 4, 16384 8)"
+            echo ""
+            echo "Examples:"
+            echo "  $0 create jop01 jop-dev            # Role defaults"
+            echo "  $0 create jop02 jop-dev 16384 8    # 16G RAM, 8 vCPUs"
             exit 1
         fi
-        run_playbook create -e "vm_name=$VM_NAME" -e "vm_role=$ARG3"
+        CREATE_EXTRA_ARGS=""
+        if [ -n "$ARG4" ]; then
+            CREATE_EXTRA_ARGS="$CREATE_EXTRA_ARGS -e vm_memory=$ARG4"
+        fi
+        if [ -n "${5:-}" ]; then
+            CREATE_EXTRA_ARGS="$CREATE_EXTRA_ARGS -e vm_vcpus=${5}"
+        fi
+        run_playbook create -e "vm_name=$VM_NAME" -e "vm_role=$ARG3" $CREATE_EXTRA_ARGS
         # Run post-creation setup for types that need it
         case "$ARG3" in
             jop-dev)
@@ -728,7 +740,7 @@ case "$ACTION" in
         echo "Usage: $0 <command> [args]"
         echo ""
         echo "VM Commands:"
-        echo "  create <name> <type>   Create a VM (types: $(vm_role_types))"
+        echo "  create <name> <type> [mem] [cpu]  Create a VM (types: $(vm_role_types))"
         echo "  destroy <name>         Destroy a VM and clean up files"
         echo "  start <name>           Start a VM"
         echo "  stop <name>            Stop a VM (graceful shutdown)"

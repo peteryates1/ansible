@@ -1,5 +1,7 @@
 # JOP FPGA development VM with MATE desktop, Quartus/Vivado/Eclipse launchers, and shared JDK
 vm_type: "jop-dev"
+vm_memory: 8192
+vm_vcpus: 4
 vm_disk_size: "64G"
 
 extra_users:

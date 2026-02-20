@@ -190,8 +190,8 @@
       command: >
         virt-install
         --name {{ builder_name }}
-        --memory 8192
-        --vcpus 4
+        --memory {{ vm_memory | default(8192) }}
+        --vcpus {{ vm_vcpus | default(4) }}
         --disk {{ builder_dir }}/{{ builder_name }}.qcow2,device=disk,bus=virtio
         --disk {{ builder_dir }}/cloud-init.iso,device=cdrom
         --os-variant debian11

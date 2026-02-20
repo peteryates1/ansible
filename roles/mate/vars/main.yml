@@ -1,5 +1,7 @@
 # MATE desktop VM with xrdp remote access
 vm_type: "mate"
+vm_memory: 8192
+vm_vcpus: 4
 vm_disk_size: "64G"
 
 extra_users:
