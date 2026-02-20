@@ -33,10 +33,10 @@
 #   ./vm share-dir jop /opt/xilinx/2025.2 /opt/xilinx/2025.2  # Share host dir with explicit mount point
 #   ./vm mount-shares jop01          # Restart VM and mount all attached shares
 #   ./vm setup jop01 jop-dev         # Run post-creation setup (share dirs, install toolchains)
-#   ./vm mirror add https://github.com/user/repo.git          # Mirror a GitHub repo to /srv/git
-#   ./vm mirror list                                           # List all mirrors
-#   ./vm mirror sync [repo]                                    # Fetch updates for all or one mirror
-#   ./vm mirror remove repo                                    # Remove a mirror
+#   ./vm mirror add https://github.com/jop-devel/jop.git      # Clone a repo to /srv/git
+#   ./vm mirror list                                           # List all repos
+#   ./vm mirror sync [repo]                                    # Pull updates for all or one repo
+#   ./vm mirror remove jop                                     # Remove a repo
 #
 # Template commands:
 #   ./vm template create common     # Create hardened base template
@@ -596,22 +596,17 @@ case "$ACTION" in
             add)
                 if [ -z "$ARG3" ]; then
                     echo "Usage: $0 mirror add <git-url>"
-                    echo "Clones a bare mirror of a remote repo into $MIRROR_DIR."
+                    echo "Clones a repo into $MIRROR_DIR with full working tree."
                     echo "Share into VMs with: $0 share-dir <vm> $MIRROR_DIR"
-                    echo "Then in VM: git clone --reference $MIRROR_DIR/<repo>.git <git-url>"
+                    echo "In VM: browse /srv/git/<repo> or clone locally to modify."
                     echo ""
-                    echo "Example: $0 mirror add https://github.com/SpinalHDL/SpinalHDL.git"
+                    echo "Example: $0 mirror add https://github.com/jop-devel/jop.git"
                     exit 1
                 fi
                 REPO_URL="$ARG3"
-                REPO_NAME="$(basename "$REPO_URL")"
-                # Ensure .git suffix
-                case "$REPO_NAME" in
-                    *.git) ;;
-                    *) REPO_NAME="${REPO_NAME}.git" ;;
-                esac
+                REPO_NAME="$(basename "$REPO_URL" .git)"
                 if [ -d "$MIRROR_DIR/$REPO_NAME" ]; then
-                    echo "Mirror already exists: $MIRROR_DIR/$REPO_NAME"
+                    echo "Repo already exists: $MIRROR_DIR/$REPO_NAME"
                     echo "Run '$0 mirror sync $REPO_NAME' to update it."
                     exit 0
                 fi
@@ -619,51 +614,53 @@ case "$ACTION" in
                     sudo mkdir -p "$MIRROR_DIR"
                     sudo chown "$(id -un):$(id -gn)" "$MIRROR_DIR"
                 fi
-                echo "Mirroring $REPO_URL -> $MIRROR_DIR/$REPO_NAME ..."
-                git clone --mirror "$REPO_URL" "$MIRROR_DIR/$REPO_NAME"
+                echo "Cloning $REPO_URL -> $MIRROR_DIR/$REPO_NAME ..."
+                git clone "$REPO_URL" "$MIRROR_DIR/$REPO_NAME"
                 echo "Done. Share into VMs with: $0 share-dir <vm> $MIRROR_DIR"
                 ;;
             list)
                 if [ ! -d "$MIRROR_DIR" ]; then
-                    echo "No mirrors found. Mirror dir: $MIRROR_DIR"
+                    echo "No repos found. Repo dir: $MIRROR_DIR"
                     exit 0
                 fi
-                echo "Git mirrors in $MIRROR_DIR:"
+                echo "Git repos in $MIRROR_DIR:"
                 echo ""
-                for repo in "$MIRROR_DIR"/*.git; do
-                    [ -d "$repo" ] || continue
+                found=0
+                for repo in "$MIRROR_DIR"/*/; do
+                    [ -d "$repo/.git" ] || continue
+                    found=1
                     name="$(basename "$repo")"
                     url="$(git -C "$repo" remote get-url origin 2>/dev/null || echo "(no remote)")"
+                    branch="$(git -C "$repo" branch --show-current 2>/dev/null || echo "?")"
                     size="$(du -sh "$repo" 2>/dev/null | cut -f1)"
-                    printf "  %-40s %8s  %s\n" "$name" "$size" "$url"
+                    printf "  %-30s %-8s %8s  %s\n" "$name" "($branch)" "$size" "$url"
                 done
+                if [ "$found" -eq 0 ]; then
+                    echo "  (none)"
+                fi
                 echo ""
                 echo "Share into VMs with: $0 share-dir <vm> $MIRROR_DIR"
-                echo "In VM: git clone --reference $MIRROR_DIR/<repo>.git <git-url>"
+                echo "In VM: browse /srv/git/<repo> or git clone /srv/git/<repo> ~/<repo>"
                 ;;
             sync)
                 if [ ! -d "$MIRROR_DIR" ]; then
-                    echo "No mirrors found."
+                    echo "No repos found."
                     exit 1
                 fi
                 if [ -n "$ARG3" ]; then
-                    REPO_NAME="$ARG3"
-                    case "$REPO_NAME" in
-                        *.git) ;;
-                        *) REPO_NAME="${REPO_NAME}.git" ;;
-                    esac
+                    REPO_NAME="$(basename "$ARG3" .git)"
                     if [ ! -d "$MIRROR_DIR/$REPO_NAME" ]; then
-                        echo "Mirror not found: $MIRROR_DIR/$REPO_NAME"
+                        echo "Repo not found: $MIRROR_DIR/$REPO_NAME"
                         exit 1
                     fi
                     echo "Syncing $REPO_NAME ..."
-                    git -C "$MIRROR_DIR/$REPO_NAME" fetch --all --prune
+                    git -C "$MIRROR_DIR/$REPO_NAME" pull --ff-only
                 else
-                    for repo in "$MIRROR_DIR"/*.git; do
-                        [ -d "$repo" ] || continue
+                    for repo in "$MIRROR_DIR"/*/; do
+                        [ -d "$repo/.git" ] || continue
                         name="$(basename "$repo")"
                         echo "Syncing $name ..."
-                        git -C "$repo" fetch --all --prune
+                        git -C "$repo" pull --ff-only || echo "  (pull failed, try manual merge)"
                     done
                 fi
                 echo "Done."
@@ -671,33 +668,29 @@ case "$ACTION" in
             remove)
                 if [ -z "$ARG3" ]; then
                     echo "Usage: $0 mirror remove <repo-name>"
-                    echo "Example: $0 mirror remove SpinalHDL.git"
+                    echo "Example: $0 mirror remove jop"
                     exit 1
                 fi
-                REPO_NAME="$ARG3"
-                case "$REPO_NAME" in
-                    *.git) ;;
-                    *) REPO_NAME="${REPO_NAME}.git" ;;
-                esac
+                REPO_NAME="$(basename "$ARG3" .git)"
                 if [ ! -d "$MIRROR_DIR/$REPO_NAME" ]; then
-                    echo "Mirror not found: $MIRROR_DIR/$REPO_NAME"
+                    echo "Repo not found: $MIRROR_DIR/$REPO_NAME"
                     exit 1
                 fi
-                echo "Removing mirror: $MIRROR_DIR/$REPO_NAME"
+                echo "Removing repo: $MIRROR_DIR/$REPO_NAME"
                 rm -rf "$MIRROR_DIR/$REPO_NAME"
                 echo "Done."
                 ;;
             *)
                 echo "Mirror subcommands:"
-                echo "  $0 mirror add <git-url>      Mirror a remote repo to $MIRROR_DIR"
-                echo "  $0 mirror list               List all mirrors"
-                echo "  $0 mirror sync [repo]        Fetch updates for all or one mirror"
-                echo "  $0 mirror remove <repo>       Remove a mirror"
+                echo "  $0 mirror add <git-url>      Clone a repo to $MIRROR_DIR"
+                echo "  $0 mirror list               List all repos"
+                echo "  $0 mirror sync [repo]        Pull updates for all or one repo"
+                echo "  $0 mirror remove <repo>      Remove a repo"
                 echo ""
                 echo "Workflow:"
-                echo "  $0 mirror add https://github.com/user/repo.git"
-                echo "  $0 share-dir jop $MIRROR_DIR"
-                echo "  # In VM: git clone --reference $MIRROR_DIR/repo.git https://github.com/user/repo.git"
+                echo "  $0 mirror add https://github.com/jop-devel/jop.git"
+                echo "  $0 share-dir jop01 $MIRROR_DIR"
+                echo "  # In VM: browse /srv/git/jop or git clone /srv/git/jop ~/jop"
                 exit 1
                 ;;
         esac
@@ -774,10 +767,10 @@ case "$ACTION" in
         echo "  setup <name> <type>        Run post-creation setup (types: jop-dev)"
         echo ""
         echo "Mirror Commands:"
-        echo "  mirror add <git-url>   Mirror a remote repo to /srv/git"
-        echo "  mirror list            List all mirrors"
-        echo "  mirror sync [repo]     Fetch updates for all or one mirror"
-        echo "  mirror remove <repo>   Remove a mirror"
+        echo "  mirror add <git-url>   Clone a repo to /srv/git"
+        echo "  mirror list            List all repos"
+        echo "  mirror sync [repo]     Pull updates for all or one repo"
+        echo "  mirror remove <repo>   Remove a repo"
         echo ""
         echo "Template Commands:"
         echo "  template create <type> Create a template (common, git, mate, jop-dev)"
@@ -815,7 +808,7 @@ case "$ACTION" in
         echo "  $0 set-passwd jop claude"
         echo "  $0 share-dir jop /opt/xilinx/2025.2"
         echo "  $0 setup jop01 jop-dev"
-        echo "  $0 mirror add https://github.com/SpinalHDL/SpinalHDL.git"
+        echo "  $0 mirror add https://github.com/jop-devel/jop.git"
         echo "  $0 mirror sync"
         echo "  $0 destroy claude01"
         ;;

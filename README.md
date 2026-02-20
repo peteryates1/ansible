@@ -128,14 +128,16 @@ USB management:
 ./vm usb-detach <vm|all> <usb_id> [usb_addr] [usb_name]
 ```
 
-Git mirrors (shared reference repos for fast clones in VMs):
+Git repos (shared read-only into VMs via `/srv/git`):
 
 ```bash
-./vm mirror add <git-url>        # Clone bare mirror to /srv/git
+./vm mirror add <git-url>        # Clone repo to /srv/git (full working tree)
 ./vm mirror list
-./vm mirror sync [repo]          # Fetch updates
+./vm mirror sync [repo]          # Pull updates
 ./vm mirror remove <repo>
 ```
+
+In VMs, browse `/srv/git/<repo>` directly or `git clone /srv/git/<repo> ~/<repo>` to get a local copy to modify.
 
 Toolchain installers:
 
