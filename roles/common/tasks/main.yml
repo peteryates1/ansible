@@ -165,6 +165,33 @@
   delay: 5
   until: vm_ip.stdout != ""
 
+- name: Get VM MAC address
+  shell: virsh domiflist {{ vm_name | quote }} | awk 'NR > 2 && $5 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { print $5; exit }'
+  register: vm_mac
+  changed_when: false
+
+- name: Add static DHCP reservation for VM
+  shell: |
+    set -euo pipefail
+    mac="{{ vm_mac.stdout }}"
+    ip="{{ vm_ip.stdout }}"
+
+    # Check if reservation already exists for this MAC
+    existing="$(virsh net-dumpxml default | grep -i "$mac" || true)"
+    if [ -n "$existing" ]; then
+      echo "already_reserved"
+      exit 0
+    fi
+
+    virsh net-update default add ip-dhcp-host \
+      "<host mac='${mac}' name='{{ vm_name }}' ip='${ip}'/>" \
+      --live --config
+    echo "reserved:${mac}:${ip}"
+  args:
+    executable: /bin/bash
+  register: dhcp_reservation
+  changed_when: "'reserved:' in dhcp_reservation.stdout"
+
 - name: Display VM information
   debug:
     msg: |

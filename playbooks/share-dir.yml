@@ -20,6 +20,7 @@
     requested_host_dir: "{{ host_dir | default('') }}"
     requested_mount_point: "{{ mount_point | default(requested_host_dir) }}"
     requested_share_tag: "{{ requested_host_dir | regex_replace('[^a-zA-Z0-9]', '_') | regex_replace('^_+', '') | regex_replace('_+$', '') }}"
+    requested_config_only: "{{ config_only | default(false) | bool }}"
 
   tasks:
     - name: Validate inputs
@@ -233,6 +234,7 @@
       command: virsh domstate {{ requested_vm_name | quote }}
       register: vm_state
       changed_when: false
+      when: not requested_config_only
 
     - name: Start VM if not running
       shell: |
@@ -278,13 +280,13 @@
         exit 1
       args:
         executable: /bin/bash
-      when: "'running' not in (vm_state.stdout | lower)"
+      when: not requested_config_only and 'running' not in (vm_state.stdout | lower)
       register: vm_started
       changed_when: "'started' in vm_started.stdout"
 
     - name: Shutdown running VM to apply filesystem device config
       command: virsh shutdown {{ requested_vm_name | quote }}
-      when: "'running' in (vm_state.stdout | lower) and share_reboot_required"
+      when: not requested_config_only and 'running' in (vm_state.stdout | lower) and share_reboot_required
       register: vm_shutdown
       changed_when: vm_shutdown.rc == 0
 
@@ -302,7 +304,7 @@
       retries: 30
       delay: 2
       until: vm_poweroff_wait.rc == 0
-      when: vm_shutdown is changed
+      when: not requested_config_only and vm_shutdown is changed
 
     - name: Start VM after shutdown
       shell: |
@@ -348,14 +350,14 @@
         exit 1
       args:
         executable: /bin/bash
-      when: vm_shutdown is changed
+      when: not requested_config_only and vm_shutdown is changed
       register: vm_restarted
       changed_when: "'started' in vm_restarted.stdout"
 
     - name: Wait for VM boot after start
       pause:
         seconds: 10
-      when: vm_started is changed or vm_restarted is changed
+      when: not requested_config_only and (vm_started is changed or vm_restarted is changed)
 
     - name: Resolve VM IP
       shell: |
@@ -393,6 +395,7 @@
       retries: 12
       delay: 5
       until: vm_ip.stdout != ""
+      when: not requested_config_only
 
     - name: Resolve SSH identity arguments from host SSH config
       shell: |
@@ -419,6 +422,7 @@
         executable: /bin/bash
       register: resolved_identity_args
       changed_when: false
+      when: not requested_config_only
 
     - name: Add dynamic SSH target host
       add_host:
@@ -435,6 +439,12 @@
         share_tag: "{{ requested_share_tag }}"
         share_mount_point: "{{ requested_mount_point }}"
         share_fs_type: "{{ effective_fs_type }}"
+      when: not requested_config_only
+
+    - name: Config-only summary
+      debug:
+        msg: "Attached {{ requested_host_dir }} as {{ requested_share_tag }} ({{ effective_fs_type }}). Skipping restart/mount (config_only=true)."
+      when: requested_config_only
 
 - name: Mount shared directory in VM
   hosts: share_dir_targets

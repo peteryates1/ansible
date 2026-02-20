@@ -22,6 +22,36 @@
       register: vm_list
       changed_when: false
 
+    - name: Get VM MAC address before destroy
+      shell: virsh domiflist {{ vm_name | quote }} | awk 'NR > 2 && $5 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { print $5; exit }'
+      register: vm_mac
+      changed_when: false
+      when: vm_name in vm_list.stdout_lines
+      ignore_errors: true
+
+    - name: Remove static DHCP reservation
+      shell: |
+        set -euo pipefail
+        mac="{{ vm_mac.stdout }}"
+
+        # Find the existing reservation to get the full XML element
+        reservation="$(virsh net-dumpxml default | grep -i "$mac" || true)"
+        if [ -z "$reservation" ]; then
+          echo "no_reservation"
+          exit 0
+        fi
+
+        # Extract the host element
+        host_xml="$(echo "$reservation" | sed 's/^[[:space:]]*//' | head -1)"
+        virsh net-update default delete ip-dhcp-host "$host_xml" --live --config
+        echo "removed:${mac}"
+      args:
+        executable: /bin/bash
+      register: dhcp_cleanup
+      changed_when: "'removed:' in dhcp_cleanup.stdout"
+      when: vm_name in vm_list.stdout_lines and vm_mac.stdout | default('') != ''
+      ignore_errors: true
+
     - name: Destroy VM (force stop)
       command: virsh destroy {{ vm_name | quote }}
       when: vm_name in vm_list.stdout_lines

@@ -31,6 +31,7 @@
 #   ./vm set-passwd jop peter              # Set login password for user (for xrdp)
 #   ./vm share-dir jop /opt/xilinx/2025.2                     # Share host dir into VM (same mount point)
 #   ./vm share-dir jop /opt/xilinx/2025.2 /opt/xilinx/2025.2  # Share host dir with explicit mount point
+#   ./vm mount-shares jop01          # Restart VM and mount all attached shares
 #   ./vm setup jop01 jop-dev         # Run post-creation setup (share dirs, install toolchains)
 #   ./vm mirror add https://github.com/user/repo.git          # Mirror a GitHub repo to /srv/git
 #   ./vm mirror list                                           # List all mirrors
@@ -579,6 +580,15 @@ case "$ACTION" in
         MOUNT_POINT="${ARG4:-$ARG3}"
         run_playbook share-dir -e "vm_name=$VM_NAME" -e "host_dir=$ARG3" -e "mount_point=$MOUNT_POINT"
         ;;
+    mount-shares)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 mount-shares <vm_name>"
+            echo "Restarts VM and mounts all attached filesystem shares."
+            echo "Use after attaching shares with share-dir in batch mode."
+            exit 1
+        fi
+        run_playbook mount-shares -e "vm_name=$VM_NAME"
+        ;;
     mirror)
         MIRROR_DIR="/srv/git"
         MIRROR_ACTION="${VM_NAME:-help}"
@@ -713,14 +723,13 @@ case "$ACTION" in
             jop-dev)
                 echo "Setting up $VM_NAME as $SETUP_TYPE..."
                 echo ""
-                echo "Sharing host directories..."
-                "$0" share-dir "$VM_NAME" /opt/altera
-                "$0" share-dir "$VM_NAME" /opt/eclipse
-                "$0" share-dir "$VM_NAME" /opt/.p2
-                "$0" share-dir "$VM_NAME" /opt/jdk1.6.0_45
-                "$0" share-dir "$VM_NAME" /opt/jdk1.8.0_202
-                "$0" share-dir "$VM_NAME" /opt/xilinx
-                "$0" share-dir "$VM_NAME" /srv/git
+                echo "Attaching host directories (config only, no restart)..."
+                for dir in /opt/altera /opt/eclipse /opt/.p2 /opt/jdk1.6.0_45 /opt/jdk1.8.0_202 /opt/xilinx /srv/git; do
+                    run_playbook share-dir -e "vm_name=$VM_NAME" -e "host_dir=$dir" -e "config_only=true"
+                done
+                echo ""
+                echo "Restarting VM and mounting all shares..."
+                "$0" mount-shares "$VM_NAME"
                 echo ""
                 echo "Installing host-side Blaster support..."
                 "$0" install-blaster "$VM_NAME"
@@ -761,6 +770,7 @@ case "$ACTION" in
         echo "  resize-disk <name> <size>  Resize VM disk and grow guest filesystem"
         echo "  set-passwd <name> <user>   Set login password for user (for xrdp)"
         echo "  share-dir <name> <host_dir> [mount_point]  Share host dir into VM (read-only)"
+        echo "  mount-shares <name>        Restart VM and mount all attached shares"
         echo "  setup <name> <type>        Run post-creation setup (types: jop-dev)"
         echo ""
         echo "Mirror Commands:"
