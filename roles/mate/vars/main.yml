@@ -1,0 +1,34 @@
+# MATE desktop VM with xrdp remote access
+vm_type: "mate"
+vm_disk_size: "64G"
+
+extra_users:
+  - name: claude
+    sudo: true
+    shell: /bin/bash
+    ssh_keys: true
+  - name: opencode
+    sudo: true
+    shell: /bin/bash
+    ssh_keys: true
+
+extra_packages:
+  - mate-desktop-environment
+  - mate-desktop-environment-extras
+  - xrdp
+  - dbus-x11
+
+extra_runcmd:
+  # Configure MATE as the xrdp session for all users
+  - echo "mate-session" > /etc/skel/.xsession
+  - |
+    for home_dir in /home/*; do
+      [ -d "$home_dir" ] || continue
+      user="$(basename "$home_dir")"
+      echo "mate-session" > "$home_dir/.xsession"
+      chown "$user:$user" "$home_dir/.xsession"
+    done
+  # Enable xrdp
+  - systemctl enable xrdp
+  # Allow RDP from private libvirt network (access via SSH tunnel from host)
+  - ufw allow from 192.168.122.0/24 to any port 3389 proto tcp

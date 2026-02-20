@@ -1,0 +1,243 @@
+---
+# Resize a VM's qcow2 disk and grow the guest filesystem.
+# Usage:
+#   ansible-playbook playbooks/resize-disk.yml -e vm_name=jop -e disk_size=64G
+#
+# Optional overrides:
+#   -e vm_user=peter
+
+- name: Resize VM disk image on host
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('') }}"
+    requested_disk_size: "{{ disk_size | default('') }}"
+    requested_vm_user: "{{ vm_user | default('peter') }}"
+    requested_host_ssh_user: "{{ host_ssh_user | default(lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true)) }}"
+    disk_path: "/var/lib/libvirt/images/{{ requested_vm_name }}/{{ requested_vm_name }}.qcow2"
+
+  tasks:
+    - name: Validate required variables
+      fail:
+        msg: "Usage: ansible-playbook playbooks/resize-disk.yml -e vm_name=<name> -e disk_size=<size>"
+      when: requested_vm_name == '' or requested_disk_size == ''
+
+    - name: Check VM existence
+      command: virsh list --all --name
+      register: vm_list
+      changed_when: false
+
+    - name: Fail when VM does not exist
+      fail:
+        msg: "VM '{{ requested_vm_name }}' does not exist."
+      when: requested_vm_name not in vm_list.stdout_lines
+
+    - name: Check disk image exists
+      stat:
+        path: "{{ disk_path }}"
+      register: disk_stat
+
+    - name: Fail when disk image is missing
+      fail:
+        msg: "Disk image not found at {{ disk_path }}"
+      when: not disk_stat.stat.exists
+
+    - name: Check VM state
+      command: virsh domstate {{ requested_vm_name }}
+      register: vm_state
+      changed_when: false
+
+    - name: Shutdown VM for disk resize
+      command: virsh shutdown {{ requested_vm_name }}
+      when: "'running' in (vm_state.stdout | lower)"
+      register: vm_shutdown
+      changed_when: vm_shutdown.rc == 0
+
+    - name: Wait for VM to power off
+      shell: |
+        state="$(virsh domstate {{ requested_vm_name }} | tr '[:upper:]' '[:lower:]')"
+        if echo "$state" | grep -q "shut off"; then
+          exit 0
+        fi
+        exit 1
+      args:
+        executable: /bin/bash
+      register: vm_poweroff_wait
+      changed_when: false
+      retries: 30
+      delay: 2
+      until: vm_poweroff_wait.rc == 0
+      when: vm_shutdown is changed
+
+    - name: Resize qcow2 disk image
+      command: qemu-img resize {{ disk_path }} {{ requested_disk_size }}
+      register: resize_result
+
+    - name: Display resize result
+      debug:
+        msg: "{{ resize_result.stdout }}"
+
+    - name: Start VM after resize
+      shell: |
+        set -euo pipefail
+
+        vm="{{ requested_vm_name }}"
+        start_out="$(virsh start "$vm" 2>&1)" && {
+          echo "started"
+          exit 0
+        }
+        echo "$start_out" >&2
+
+        if ! echo "$start_out" | grep -qi "Did not find USB device"; then
+          exit 1
+        fi
+
+        xml_file="$(mktemp /tmp/${vm}-domain-XXXXXX.xml)"
+        clean_xml_file="$(mktemp /tmp/${vm}-domain-clean-XXXXXX.xml)"
+        cleanup() {
+          rm -f "$xml_file" "$clean_xml_file"
+        }
+        trap cleanup EXIT
+
+        virsh dumpxml "$vm" > "$xml_file"
+        awk '
+          BEGIN { skip=0 }
+          /<hostdev[^>]*type=.usb./ { skip=1 }
+          !skip { print }
+          skip && /<\/hostdev>/ { skip=0 }
+        ' "$xml_file" > "$clean_xml_file"
+
+        if cmp -s "$xml_file" "$clean_xml_file"; then
+          echo "Failed to start VM and no removable USB hostdev blocks were found." >&2
+          exit 1
+        fi
+
+        virsh define "$clean_xml_file" >/dev/null
+        retry_out="$(virsh start "$vm" 2>&1)" && {
+          echo "started_after_usb_cleanup"
+          exit 0
+        }
+        echo "$retry_out" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: vm_started
+      changed_when: "'started' in vm_started.stdout"
+
+    - name: Wait for VM boot after start
+      pause:
+        seconds: 10
+      when: vm_started is changed
+
+    - name: Resolve VM IP
+      shell: |
+        set -euo pipefail
+
+        mac="$(virsh -c qemu:///system domiflist '{{ requested_vm_name }}' 2>/dev/null | awk 'NR > 2 && $5 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { print $5; exit }')"
+        ip=""
+
+        if [ -n "$mac" ]; then
+          ip="$(virsh -c qemu:///system net-dhcp-leases default 2>/dev/null | awk -v mac="$mac" '
+            BEGIN { IGNORECASE = 1 }
+            $0 ~ mac {
+              split($5, parts, "/")
+              print parts[1]
+              exit
+            }
+          ')"
+        fi
+
+        if [ -z "$ip" ]; then
+          ip="$(virsh -c qemu:///system domifaddr '{{ requested_vm_name }}' 2>/dev/null | awk '
+            /ipv4/ {
+              split($4, parts, "/")
+              print parts[1]
+              exit
+            }
+          ')"
+        fi
+
+        echo "$ip"
+      args:
+        executable: /bin/bash
+      register: vm_ip
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: vm_ip.stdout != ""
+
+    - name: Resolve SSH identity arguments from host SSH config
+      shell: |
+        set -euo pipefail
+
+        ssh_config="/home/{{ requested_host_ssh_user }}/.ssh/config"
+        if [ -f "$ssh_config" ]; then
+          identity_lines="$(ssh -F "$ssh_config" -G "{{ vm_ip.stdout }}" 2>/dev/null | awk '/^identityfile / { print $2 }')"
+        else
+          identity_lines="$(ssh -G "{{ vm_ip.stdout }}" 2>/dev/null | awk '/^identityfile / { print $2 }')"
+        fi
+
+        printf '%s\n' "$identity_lines" \
+          | sed "s#^~/#/home/{{ requested_host_ssh_user }}/#" \
+          | awk 'NF && !seen[$0]++ { print }' \
+          | while IFS= read -r key; do
+              [ -f "$key" ] || continue
+              case "$key" in
+                *.pub) continue ;;
+              esac
+              printf -- "-o IdentityFile=%s " "$key"
+            done
+      args:
+        executable: /bin/bash
+      register: resolved_identity_args
+      changed_when: false
+
+    - name: Add dynamic SSH target host
+      add_host:
+        name: resize_target
+        groups: resize_targets
+        ansible_host: "{{ vm_ip.stdout }}"
+        ansible_user: "{{ requested_vm_user }}"
+        ansible_ssh_common_args: >-
+          {{
+            ((resolved_identity_args.stdout | trim) ~ ' ')
+            if (resolved_identity_args.stdout | trim) != ''
+            else ''
+          }}-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+
+- name: Grow guest partition and filesystem
+  hosts: resize_targets
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Wait for SSH
+      wait_for_connection:
+        timeout: 300
+
+    - name: Install cloud-guest-utils (provides growpart)
+      apt:
+        name: cloud-guest-utils
+        state: present
+        update_cache: true
+
+    - name: Grow partition to fill disk
+      command: growpart /dev/vda 1
+      register: growpart_result
+      changed_when: "'CHANGED' in growpart_result.stdout"
+      failed_when: growpart_result.rc != 0 and 'NOCHANGE' not in growpart_result.stdout
+
+    - name: Resize filesystem
+      command: resize2fs /dev/vda1
+      register: resize2fs_result
+      changed_when: resize2fs_result.rc == 0
+
+    - name: Show disk usage
+      command: df -h /
+      register: df_result
+      changed_when: false
+
+    - name: Display result
+      debug:
+        msg: "{{ df_result.stdout }}"

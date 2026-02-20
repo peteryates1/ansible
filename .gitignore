@@ -1,0 +1,33 @@
+# SSH keys and credentials
+*.pem
+*.key
+id_*
+*.pub
+authorized_keys
+
+# Ansible vault passwords
+.vault_pass
+vault_password_file
+
+# Ansible retry files
+*.retry
+
+# Cloud-init generated files
+cloud-init.iso
+user-data
+meta-data
+network-config
+
+# VM disk images
+*.qcow2
+*.iso
+
+# Environment and local config
+.env
+.claude/
+
+# Editor and OS files
+*.swp
+*.swo
+*~
+.DS_Store

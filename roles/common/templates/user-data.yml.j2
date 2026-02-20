@@ -2,6 +2,7 @@
 users:
   - name: peter
     sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: dialout,plugdev
     shell: /bin/bash
     lock_passwd: true
     ssh_authorized_keys:
@@ -13,6 +14,7 @@ users:
 {% if user.sudo | default(false) %}
     sudo: ALL=(ALL) NOPASSWD:ALL
 {% endif %}
+    groups: dialout,plugdev
     shell: {{ user.shell | default('/bin/bash') }}
     lock_passwd: true
 {% if user.ssh_keys | default(true) %}

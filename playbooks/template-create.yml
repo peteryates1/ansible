@@ -5,6 +5,7 @@
 #   ansible-playbook playbooks/template-create.yml -e template_type=claude
 #   ansible-playbook playbooks/template-create.yml -e template_type=git
 #   ansible-playbook playbooks/template-create.yml -e template_type=opencode
+#   ansible-playbook playbooks/template-create.yml -e template_type=mate
 
 - name: Create VM template
   hosts: localhost
@@ -22,8 +23,8 @@
   tasks:
     - name: Validate template type
       fail:
-        msg: "Invalid template_type '{{ template_type }}'. Must be: common, claude, git, or opencode"
-      when: template_type not in ['common', 'claude', 'git', 'opencode']
+        msg: "Invalid template_type '{{ template_type }}'. Must be: common, claude, git, opencode, or mate"
+      when: template_type not in ['common', 'claude', 'git', 'opencode', 'mate']
 
     - name: Set template file paths
       set_fact:
@@ -54,12 +55,12 @@
       stat:
         path: "{{ common_template }}"
       register: common_exists
-      when: template_type in ['claude', 'git', 'opencode']
+      when: template_type in ['claude', 'git', 'opencode', 'mate']
 
     - name: Fail if common template missing
       fail:
         msg: "common-hardened template required. Create it first: ./vm template create common"
-      when: template_type in ['claude', 'git', 'opencode'] and not common_exists.stat.exists
+      when: template_type in ['claude', 'git', 'opencode', 'mate'] and not common_exists.stat.exists
 
     - name: Create template directory
       file:
@@ -81,7 +82,7 @@
     - name: Set backing image for role templates
       set_fact:
         backing_image: "{{ common_template }}"
-      when: template_type in ['claude', 'git', 'opencode']
+      when: template_type in ['claude', 'git', 'opencode', 'mate']
 
     - name: Download base image if needed
       get_url:
@@ -115,7 +116,7 @@
     - name: Include template-specific vars
       include_vars:
         file: "../roles/{{ template_type }}/vars/main.yml"
-      when: template_type in ['claude', 'git', 'opencode']
+      when: template_type in ['claude', 'git', 'opencode', 'mate']
 
     - name: Set common template vars
       set_fact:
@@ -190,7 +191,7 @@
 
     - name: Wait for cloud-init to complete (checking console log)
       shell: |
-        for i in $(seq 1 60); do
+        for i in $(seq 1 120); do
           if grep -q "Cloud-init.*finished" {{ builder_dir }}/console.log 2>/dev/null; then
             echo "Cloud-init completed"
             exit 0

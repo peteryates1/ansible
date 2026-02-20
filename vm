@@ -22,8 +22,13 @@
 #   ./vm usb-attach fpga01 0403:6010 001:011 "Arrow Blaster"        # Attach specific duplicate USB ID
 #   ./vm usb-detach all 09fb:6001 "Altera Blaster"                  # Detach USB device from all VMs
 #   ./vm usb-detach fpga01 0403:6010 001:011 "Arrow Blaster"        # Detach specific duplicate USB ID
-#   ./vm install-quartus fpga01 [user]  # Install Quartus + Arrow USB support from shared host dirs
+#   ./vm install-blaster jop [user]     # Install Arrow USB Blaster support in VM
+#   ./vm install-alchitry jop [user]   # Install Alchitry AU udev rules in VM
 #   ./vm install-spinalhdl fpga01 [user]  # Install Java/Scala/sbt toolchain in VM
+#   ./vm resize-disk jop 64G              # Resize VM disk and grow guest filesystem
+#   ./vm set-passwd jop peter              # Set login password for user (for xrdp)
+#   ./vm share-dir jop /opt/xilinx/2025.2                     # Share host dir into VM (same mount point)
+#   ./vm share-dir jop /opt/xilinx/2025.2 /opt/xilinx/2025.2  # Share host dir with explicit mount point
 #
 # Template commands:
 #   ./vm template create common     # Create hardened base template
@@ -234,13 +239,14 @@ case "$ACTION" in
             create)
                 if [ -z "$TEMPLATE_TYPE" ]; then
                     echo "Usage: $0 template create <type>"
-                    echo "Types: common, claude, git, opencode"
+                    echo "Types: common, claude, git, opencode, mate"
                     echo ""
                     echo "Template hierarchy:"
                     echo "  1. ./vm template create common    # Base hardened template"
                     echo "  2. ./vm template create claude    # Requires common"
                     echo "  2. ./vm template create git       # Requires common"
                     echo "  2. ./vm template create opencode  # Requires common"
+                    echo "  2. ./vm template create mate      # Requires common (MATE desktop + xrdp)"
                     exit 1
                 fi
                 run_playbook template-create -e "template_type=$TEMPLATE_TYPE"
@@ -251,18 +257,18 @@ case "$ACTION" in
             destroy)
                 if [ -z "$TEMPLATE_TYPE" ]; then
                     echo "Usage: $0 template destroy <type>"
-                    echo "Types: common, claude, git, opencode"
+                    echo "Types: common, claude, git, opencode, mate"
                     exit 1
                 fi
                 run_playbook template-destroy -e "template_type=$TEMPLATE_TYPE"
                 ;;
             *)
                 echo "Template subcommands:"
-                echo "  $0 template create <type>   Create a template (common, claude, git, opencode)"
+                echo "  $0 template create <type>   Create a template (common, claude, git, opencode, mate)"
                 echo "  $0 template list            List all templates"
                 echo "  $0 template destroy <type>  Remove a template"
                 echo ""
-                echo "Create templates in order: common -> claude/git/opencode"
+                echo "Create templates in order: common -> claude/git/opencode/mate"
                 exit 1
                 ;;
         esac
@@ -453,17 +459,26 @@ case "$ACTION" in
             fi
         fi
         ;;
-    install-quartus)
+    install-blaster)
         if [ -z "$VM_NAME" ]; then
-            echo "Usage: $0 install-quartus <vm_name> [vm_user]"
+            echo "Usage: $0 install-blaster <vm_name> [vm_user]"
+            echo "Installs Arrow USB Blaster support (udev rules, config, .so)."
+            echo "Copies Arrow .so into host Quartus linux64 dir (shared read-only into VM)."
             echo "Defaults: vm_user=peter"
-            echo "Shared dirs:"
-            echo "  /var/lib/libvirt/shared/quartus"
-            echo "  /var/lib/libvirt/shared/Arrow_USB_Programmer_2.5.1_linux64"
             exit 1
         fi
         INSTALL_USER="${ARG3:-peter}"
-        run_playbook install-quartus -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        run_playbook install-blaster -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        ;;
+    install-alchitry)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 install-alchitry <vm_name> [vm_user]"
+            echo "Installs Alchitry AU udev rules (FTDI FT2232H)."
+            echo "Defaults: vm_user=peter"
+            exit 1
+        fi
+        INSTALL_USER="${ARG3:-peter}"
+        run_playbook install-alchitry -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
         ;;
     install-spinalhdl)
         if [ -z "$VM_NAME" ]; then
@@ -473,6 +488,54 @@ case "$ACTION" in
         fi
         INSTALL_USER="${ARG3:-peter}"
         run_playbook install-spinalhdl -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
+        ;;
+    resize-disk)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 resize-disk <vm_name> <size>"
+            echo "Resizes VM disk and grows guest partition/filesystem."
+            echo "Size format: e.g. 64G, 128G"
+            echo ""
+            echo "Example: $0 resize-disk jop 64G"
+            exit 1
+        fi
+        run_playbook resize-disk -e "vm_name=$VM_NAME" -e "disk_size=$ARG3"
+        ;;
+    set-passwd)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 set-passwd <vm_name> <user>"
+            echo "Sets a login password for a user in the VM (for xrdp, etc)."
+            echo ""
+            echo "Examples:"
+            echo "  $0 set-passwd jop peter"
+            echo "  $0 set-passwd jop claude"
+            exit 1
+        fi
+        if ! [[ "$ARG3" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            echo "Invalid username: $ARG3"
+            exit 1
+        fi
+        IP=$(get_vm_ip "$VM_NAME")
+        if [ -z "$IP" ]; then
+            echo "Cannot determine IP for $VM_NAME. Is it running?"
+            exit 1
+        fi
+        echo "Setting password for $ARG3 on $VM_NAME ($IP)..."
+        ssh -t -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$IP" "sudo passwd $ARG3"
+        ;;
+    share-dir)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 share-dir <vm_name> <host_dir> [mount_point]"
+            echo "Shares a host directory into a VM via virtiofs (read-only)."
+            echo "Default mount_point = host_dir (same path inside VM)."
+            echo ""
+            echo "Examples:"
+            echo "  $0 share-dir jop /opt/xilinx/2025.2"
+            echo "  $0 share-dir jop /opt/altera/25.1"
+            echo "  $0 share-dir jop /opt/jdk1.8.0_202"
+            exit 1
+        fi
+        MOUNT_POINT="${ARG4:-$ARG3}"
+        run_playbook share-dir -e "vm_name=$VM_NAME" -e "host_dir=$ARG3" -e "mount_point=$MOUNT_POINT"
         ;;
     help|--help|-h)
         echo "VM Management Tool"
@@ -493,11 +556,15 @@ case "$ACTION" in
         echo "  usb-serials            List USB serial ports and mapped USB identity"
         echo "  usb-attach <name> <usb_id> [usb_addr] [usb_name]  Attach USB device to VM (auto handoff)"
         echo "  usb-detach <name|all> <usb_id> [usb_addr] [usb_name]  Detach USB device"
-        echo "  install-quartus <name> [user]  Install Quartus + Arrow USB support in VM"
+        echo "  install-blaster <name> [user]  Install Arrow USB Blaster support in VM"
+        echo "  install-alchitry <name> [user] Install Alchitry AU udev rules in VM"
         echo "  install-spinalhdl <name> [user]  Install Java/Scala/sbt toolchain in VM"
+        echo "  resize-disk <name> <size>  Resize VM disk and grow guest filesystem"
+        echo "  set-passwd <name> <user>   Set login password for user (for xrdp)"
+        echo "  share-dir <name> <host_dir> [mount_point]  Share host dir into VM (read-only)"
         echo ""
         echo "Template Commands:"
-        echo "  template create <type> Create a template (common, claude, git, opencode)"
+        echo "  template create <type> Create a template (common, claude, git, opencode, mate)"
         echo "  template list          List all templates"
         echo "  template destroy <type> Remove a template"
         echo ""
@@ -506,6 +573,7 @@ case "$ACTION" in
         echo "  2. $0 template create claude    # Claude Code template"
         echo "  2. $0 template create git       # Git server template"
         echo "  2. $0 template create opencode  # OpenCode template"
+        echo "  2. $0 template create mate      # MATE desktop + xrdp template"
         echo "  3. $0 create claude01 claude    # Fast instance from template"
         echo ""
         echo "Examples:"
@@ -525,8 +593,12 @@ case "$ACTION" in
         echo "  $0 usb-attach fpga01 0403:6010 001:011 \"Arrow Blaster\""
         echo "  $0 usb-detach all 09fb:6001 \"Altera Blaster\""
         echo "  $0 usb-detach fpga01 0403:6010 001:011 \"Arrow Blaster\""
-        echo "  $0 install-quartus fpga01"
+        echo "  $0 install-blaster jop"
+        echo "  $0 install-alchitry jop"
         echo "  $0 install-spinalhdl fpga01"
+        echo "  $0 resize-disk jop 64G"
+        echo "  $0 set-passwd jop claude"
+        echo "  $0 share-dir jop /opt/xilinx/2025.2"
         echo "  $0 destroy claude01"
         ;;
     *)

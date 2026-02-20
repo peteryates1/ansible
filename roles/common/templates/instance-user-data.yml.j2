@@ -8,6 +8,7 @@ preserve_hostname: false
 
 users:
   - name: peter
+    groups: dialout,plugdev
     lock_passwd: true
     ssh_authorized_keys:
 {% for key in ssh_authorized_keys %}
@@ -16,6 +17,7 @@ users:
 {% for user in extra_users %}
 {% if user.ssh_keys | default(true) %}
   - name: {{ user.name }}
+    groups: dialout,plugdev
     lock_passwd: true
     ssh_authorized_keys:
 {% for key in ssh_authorized_keys %}
