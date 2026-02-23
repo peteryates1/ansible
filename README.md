@@ -131,6 +131,8 @@ USB management:
 ./vm usb-auto <vm> <usb_id> [usb_name]  # Auto-passthrough USB device to VM (udev rule)
 ./vm usb-auto-remove <vm> <usb_id>      # Remove USB auto-passthrough
 ./vm usb-auto-list                       # List active auto-passthrough rules
+./vm usb-watchers                        # List active unplug watchers
+./vm usb-watchers clean                  # Kill all stale watchers
 ```
 
 Git repos (shared read-only into VMs via `/srv/git`):
