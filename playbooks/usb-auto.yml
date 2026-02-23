@@ -172,6 +172,8 @@
           VENDOR="${3:-}"
           PRODUCT="${4:-}"
           SERIAL="${5:-}"
+          ATTACH_BUS="${6:-}"
+          ATTACH_DEV="${7:-}"
 
           [ -n "$ACTION" ] && [ -n "$VM" ] && [ -n "$VENDOR" ] && [ -n "$PRODUCT" ] || exit 1
 
@@ -310,15 +312,29 @@
                 fi
               fi
 
+              start_watcher=0
               err=$(virsh -c qemu:///system attach-device "$VM" "$xml" --live 2>&1) && {
                 log "Attached $VENDOR:$PRODUCT to $VM"
+                start_watcher=1
+              } || {
+                if echo "$err" | grep -q "in use.*$VM"; then
+                  log "Device $VENDOR:$PRODUCT already attached to $VM"
+                  start_watcher=1
+                  # Resolve bus:device if we don't have it yet
+                  if [ -z "${FOUND_BUS:-}" ] && [ -n "$SERIAL" ]; then
+                    find_usb_device "$VENDOR" "$PRODUCT" "$SERIAL" || true
+                  fi
+                else
+                  log "Failed to attach $VENDOR:$PRODUCT to $VM: $err"
+                fi
+              }
 
+              if [ "$start_watcher" -eq 1 ]; then
                 # Launch watcher in its own systemd scope (survives udev cgroup cleanup)
                 systemd-run --quiet --scope -- \
-                  /usr/local/bin/vm-usb-passthrough watch "$VM" "$VENDOR" "$PRODUCT" "$SERIAL" &
-              } || {
-                log "Failed to attach $VENDOR:$PRODUCT to $VM: $err"
-              }
+                  /usr/local/bin/vm-usb-passthrough watch "$VM" "$VENDOR" "$PRODUCT" "$SERIAL" \
+                  "${FOUND_BUS:-}" "${FOUND_DEV:-}" &
+              fi
               ;;
 
             detach)
@@ -363,7 +379,7 @@
               exec 9>&-
               set +e
 
-              log "Watcher started for $VENDOR:$PRODUCT${SERIAL:+ serial=$SERIAL} on $VM"
+              log "Watcher started for $VENDOR:$PRODUCT${SERIAL:+ serial=$SERIAL}${ATTACH_BUS:+ bus=$ATTACH_BUS:$ATTACH_DEV} on $VM"
 
               while sleep 2; do
                 virsh -c qemu:///system domstate "$VM" 2>/dev/null | grep -q running || { log "Watcher: VM $VM not running"; break; }
@@ -377,13 +393,12 @@
                 log "Watcher: $VENDOR:$PRODUCT${SERIAL:+ serial=$SERIAL} gone from host, detaching from $VM"
 
                 xml=$(mktemp /tmp/usb-watch-XXXXXX.xml)
-                if [ -n "$SERIAL" ]; then
-                  # Device gone - try to find it in VM's live XML by vendor:product
+                if [ -n "$ATTACH_BUS" ] && [ -n "$ATTACH_DEV" ]; then
+                  # Use exact bus:device from when we attached
                   cat > "$xml" <<XMLEOF
           <hostdev mode='subsystem' type='usb' managed='yes'>
             <source>
-              <vendor id='0x${VENDOR}'/>
-              <product id='0x${PRODUCT}'/>
+              <address bus='${ATTACH_BUS}' device='${ATTACH_DEV}'/>
             </source>
           </hostdev>
           XMLEOF
