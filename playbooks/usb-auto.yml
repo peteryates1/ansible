@@ -157,6 +157,48 @@
       register: usb_controller_result
       changed_when: "'usb_controller=added' in usb_controller_result.stdout"
 
+    - name: Install libvirt qemu hook for USB re-attach on VM start
+      copy:
+        dest: /etc/libvirt/hooks/qemu
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Re-attach USB auto-passthrough devices when a VM starts.
+          # Installed by: ./vm usb-auto
+
+          DOMAIN="$1"
+          OPERATION="$2"
+          SUB_OPERATION="$3"
+
+          [ "$OPERATION" = "started" ] && [ "$SUB_OPERATION" = "begin" ] || exit 0
+
+          SCRIPT=/usr/local/bin/vm-usb-passthrough
+
+          for rule in /etc/udev/rules.d/90-vm-usb-"${DOMAIN}"-*.rules; do
+            [ -f "$rule" ] || continue
+            base="$(basename "$rule" .rules)"
+            suffix="${base#90-vm-usb-${DOMAIN}-}"
+            if [[ "$suffix" =~ ^([0-9a-f]{8})-(.+)$ ]]; then
+              devid="${BASH_REMATCH[1]}"
+              serial="${BASH_REMATCH[2]}"
+            elif [[ "$suffix" =~ ^([0-9a-f]{8})$ ]]; then
+              devid="${BASH_REMATCH[1]}"
+              serial=""
+            else
+              continue
+            fi
+            vendor="${devid:0:4}"
+            product="${devid:4:4}"
+            "$SCRIPT" attach "$DOMAIN" "$vendor" "$product" "$serial" &
+          done
+      register: qemu_hook
+
+    - name: Restart libvirtd to pick up new hook
+      service:
+        name: libvirtd
+        state: restarted
+      when: qemu_hook is changed
+
     - name: Install USB passthrough helper script
       copy:
         dest: "{{ passthrough_script }}"
@@ -507,4 +549,4 @@
           {% else %}
             Status: Rule configured (will auto-attach on plug)
           {% endif %}
-          Note: If VM is restarted with device plugged in, replug the device to trigger auto-attach.
+          USB devices are automatically re-attached when the VM starts (via libvirt qemu hook).
