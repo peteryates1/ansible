@@ -1,0 +1,116 @@
+---
+# Detach all USB passthrough devices from a VM (or all VMs).
+#
+# Usage:
+#   ansible-playbook playbooks/usb-detach-all.yml -e vm_name=pico
+#   ansible-playbook playbooks/usb-detach-all.yml
+
+- name: Detach all USB devices from VM(s)
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('') }}"
+
+  tasks:
+    - name: Get target VM list
+      shell: |
+        set -euo pipefail
+        if [ -n "{{ requested_vm_name }}" ]; then
+          echo "{{ requested_vm_name }}"
+        else
+          virsh list --all --name | sed '/^$/d'
+        fi
+      args:
+        executable: /bin/bash
+      register: target_vms
+      changed_when: false
+
+    - name: Validate requested VM exists
+      command: virsh list --all --name
+      register: all_vms
+      changed_when: false
+      when: requested_vm_name != ''
+
+    - name: Fail when VM does not exist
+      fail:
+        msg: "VM '{{ requested_vm_name }}' does not exist."
+      when: requested_vm_name != '' and requested_vm_name not in all_vms.stdout_lines
+
+    - name: Detach all USB devices from each VM
+      shell: |
+        set -euo pipefail
+
+        vm="{{ item }}"
+        detached=0
+        tmpdir="$(mktemp -d /tmp/usb-detach-all-XXXXXX)"
+        trap 'rm -rf "$tmpdir"' EXIT
+
+        # Remove auto-passthrough udev rules for this VM
+        rules_removed=0
+        for rule in /etc/udev/rules.d/90-vm-usb-"${vm}"-*.rules; do
+          [ -f "$rule" ] || continue
+          rm -f "$rule"
+          rules_removed=1
+        done
+        if [ "$rules_removed" -eq 1 ]; then
+          udevadm control --reload-rules
+        fi
+
+        # Strip USB hostdev from persistent config
+        virsh dumpxml --inactive "$vm" 2>/dev/null > "$tmpdir/inactive.xml" || true
+        if grep -q '<hostdev.*type=.usb.' "$tmpdir/inactive.xml"; then
+          awk '
+            BEGIN { skip=0 }
+            /<hostdev[^>]*type=.usb./ { skip=1 }
+            !skip { print }
+            skip && /<\/hostdev>/ { skip=0 }
+          ' "$tmpdir/inactive.xml" > "$tmpdir/clean.xml"
+
+          if ! cmp -s "$tmpdir/inactive.xml" "$tmpdir/clean.xml"; then
+            virsh define "$tmpdir/clean.xml" >/dev/null
+            detached=1
+          fi
+        fi
+
+        # Detach from live config if VM is running
+        state="$(virsh domstate "$vm" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        if [ "$state" = "running" ]; then
+          virsh dumpxml "$vm" 2>/dev/null > "$tmpdir/live.xml" || true
+
+          # Extract each USB hostdev block to its own file
+          awk '
+            /<hostdev[^>]*type=.usb./ { in_usb=1; n++ }
+            in_usb { print > ("'"$tmpdir"'/dev-" n ".xml") }
+            in_usb && /<\/hostdev>/ { in_usb=0 }
+          ' "$tmpdir/live.xml"
+
+          # Detach each one
+          for dev_file in "$tmpdir"/dev-*.xml; do
+            [ -f "$dev_file" ] || continue
+            virsh detach-device "$vm" "$dev_file" --live 2>/dev/null || true
+            detached=1
+          done
+        fi
+
+        if [ "$detached" -eq 1 ] || [ "$rules_removed" -eq 1 ]; then
+          echo "detached_usb_from={{ item }}"
+          [ "$rules_removed" -eq 1 ] && echo "auto_rules_removed={{ item }}"
+        else
+          echo "no_usb_on={{ item }}"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ target_vms.stdout_lines }}"
+      register: detach_results
+      changed_when: "'detached_usb_from=' in detach_results.stdout"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Display results
+      debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ detach_results.results }}"
+      when: "'detached_usb_from=' in item.stdout"
+      loop_control:
+        label: "{{ item.item }}"

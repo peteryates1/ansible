@@ -7,7 +7,7 @@ It supports:
 - Creating VMs from templates for role types: `common`, `git`, `mate`, `jop-dev`.
 - VM lifecycle operations (`start`, `stop`, `status`, `destroy`, `list`, `ip`, `ssh`).
 - Sharing host directories into VMs via virtiofs/9p.
-- USB device attach/detach flows for FPGA and serial workflows.
+- USB device attach/detach and auto-passthrough (udev) for FPGA and serial workflows.
 - Git mirror management for shared reference repos.
 - Toolchain installers for SpinalHDL, Alchitry, Arrow USB Blaster, Claude Code, OpenCode, VS Code, and VSCodium.
 - Automated post-creation setup for complex VM types (`jop-dev`).
@@ -126,7 +126,11 @@ USB management:
 ./vm usb-serials
 ./vm usb-attach <vm> <usb_id> [usb_addr] [usb_name]
 ./vm usb-detach [vm] <usb_id> [usb_addr] [usb_name]
+./vm usb-detach-all [vm]             # Detach all USB devices from VM (or all VMs)
 ./vm usb-cleanup <vm>                # Remove stale USB entries (unplugged devices)
+./vm usb-auto <vm> <usb_id> [usb_name]  # Auto-passthrough USB device to VM (udev rule)
+./vm usb-auto-remove <vm> <usb_id>      # Remove USB auto-passthrough
+./vm usb-auto-list                       # List active auto-passthrough rules
 ```
 
 Git repos (shared read-only into VMs via `/srv/git`):

@@ -22,7 +22,15 @@
 #   ./vm usb-attach fpga01 0403:6010 001:011 "Arrow Blaster"        # Attach specific duplicate USB ID
 #   ./vm usb-detach 09fb:6001 "Altera Blaster"                      # Detach USB device from all VMs
 #   ./vm usb-detach fpga01 0403:6010 001:011 "Arrow Blaster"        # Detach from specific VM
+#   ./vm usb-detach-all pico                                        # Detach all USB devices from a VM
+#   ./vm usb-detach-all                                              # Detach all USB devices from all VMs
 #   ./vm usb-cleanup jop01              # Remove stale USB entries (unplugged devices)
+#   ./vm usb-auto pico 2e8a:000a                                    # Auto-passthrough USB device to VM
+#   ./vm usb-auto jop-claude 09fb:6001 "Altera Blaster"             # Auto-passthrough with name filter
+#   ./vm usb-auto-remove pico 2e8a:000a                             # Remove auto-passthrough
+#   ./vm usb-auto-list                                               # List active auto-passthrough rules
+#   ./vm usb-watchers                                                # List active unplug watchers
+#   ./vm usb-watchers clean                                          # Kill all stale watchers
 #   ./vm install-blaster jop [user]     # Install Arrow USB Blaster support in VM
 #   ./vm install-alchitry jop [user]   # Install Alchitry AU udev rules in VM
 #   ./vm install-spinalhdl fpga01 [user]  # Install Java/Scala/sbt toolchain in VM
@@ -513,6 +521,14 @@ case "$ACTION" in
             fi
         fi
         ;;
+    usb-detach-all)
+        if [ -z "$VM_NAME" ]; then
+            echo "Detaching all USB devices from all VMs..."
+            run_playbook usb-detach-all
+        else
+            run_playbook usb-detach-all -e "vm_name=$VM_NAME"
+        fi
+        ;;
     usb-cleanup)
         if [ -z "$VM_NAME" ]; then
             echo "Usage: $0 usb-cleanup <vm_name>"
@@ -521,6 +537,94 @@ case "$ACTION" in
             exit 1
         fi
         run_playbook usb-cleanup -e "vm_name=$VM_NAME"
+        ;;
+    usb-auto)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 usb-auto <vm_name> <usb_id> [usb_name]"
+            echo "Sets up automatic USB passthrough (udev rule) so the device"
+            echo "auto-attaches to the VM when plugged in."
+            echo ""
+            echo "Examples:"
+            echo "  $0 usb-auto pico 2e8a:000a"
+            echo "  $0 usb-auto pico 2e8a:0003              # RP2 Boot mode"
+            echo "  $0 usb-auto jop-claude 09fb:6001 \"Altera Blaster\""
+            echo "  $0 usb-auto jop-claude 0403:6010 \"Arrow USB Blaster\""
+            exit 1
+        fi
+        USB_NAME="${*:4}"
+        if [ -n "$USB_NAME" ]; then
+            run_playbook usb-auto -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_name='$USB_NAME'"
+        else
+            run_playbook usb-auto -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+        fi
+        ;;
+    usb-auto-remove)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 usb-auto-remove <vm_name> <usb_id>"
+            echo "Removes automatic USB passthrough for a device."
+            echo ""
+            echo "Examples:"
+            echo "  $0 usb-auto-remove pico 2e8a:000a"
+            echo "  $0 usb-auto-remove jop-claude 09fb:6001"
+            exit 1
+        fi
+        run_playbook usb-auto-remove -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+        ;;
+    usb-auto-list)
+        echo "Active USB auto-passthrough rules:"
+        echo ""
+        found=0
+        for rule in /etc/udev/rules.d/90-vm-usb-*.rules; do
+            [ -f "$rule" ] || continue
+            found=1
+            # Parse filename: 90-vm-usb-<vm>-<vendor><product>[-<serial>].rules
+            base="$(basename "$rule" .rules)"
+            suffix="${base#90-vm-usb-}"
+            serial=""
+            if [[ "$suffix" =~ ^(.*)-([0-9a-f]{8})-(.+)$ ]]; then
+                vm_part="${BASH_REMATCH[1]}"
+                devid="${BASH_REMATCH[2]}"
+                serial="${BASH_REMATCH[3]}"
+            elif [[ "$suffix" =~ ^(.*)-([0-9a-f]{8})$ ]]; then
+                vm_part="${BASH_REMATCH[1]}"
+                devid="${BASH_REMATCH[2]}"
+            else
+                continue
+            fi
+            vendor="${devid:0:4}"
+            product="${devid:4:4}"
+            if [ -n "$serial" ]; then
+                printf "  %-20s %s:%s  serial=%-12s (%s)\n" "$vm_part" "$vendor" "$product" "$serial" "$(basename "$rule")"
+            else
+                printf "  %-20s %s:%s  (%s)\n" "$vm_part" "$vendor" "$product" "$(basename "$rule")"
+            fi
+        done
+        if [ "$found" -eq 0 ]; then
+            echo "  (none)"
+        fi
+        ;;
+    usb-watchers)
+        echo "Active USB passthrough watchers:"
+        echo ""
+        watchers=$(pgrep -af "vm-usb-passthrough watch" 2>/dev/null || true)
+        if [ -z "$watchers" ]; then
+            echo "  (none)"
+        else
+            echo "$watchers" | while IFS= read -r line; do
+                pid=$(echo "$line" | awk '{print $1}')
+                vm=$(echo "$line" | awk '{print $5}')
+                vendor=$(echo "$line" | awk '{print $6}')
+                product=$(echo "$line" | awk '{print $7}')
+                printf "  pid %-8s %-20s %s:%s\n" "$pid" "$vm" "$vendor" "$product"
+            done
+        fi
+        if [ "${2:-}" = "clean" ]; then
+            if [ -n "$watchers" ]; then
+                pkill -f "vm-usb-passthrough watch" 2>/dev/null || true
+                echo ""
+                echo "All watchers killed."
+            fi
+        fi
         ;;
     install-blaster)
         if [ -z "$VM_NAME" ]; then
@@ -817,7 +921,11 @@ case "$ACTION" in
         echo "  usb-serials            List USB serial ports and mapped USB identity"
         echo "  usb-attach <name> <usb_id> [usb_addr] [usb_name]  Attach USB device to VM (auto handoff)"
         echo "  usb-detach [name] <usb_id> [usb_addr] [usb_name]  Detach USB device (default: all VMs)"
+        echo "  usb-detach-all [name]  Detach all USB devices from VM (or all VMs)"
         echo "  usb-cleanup <name>    Remove stale USB entries (unplugged devices)"
+        echo "  usb-auto <name> <usb_id> [usb_name]  Auto-passthrough USB device to VM (udev)"
+        echo "  usb-auto-remove <name> <usb_id>      Remove USB auto-passthrough"
+        echo "  usb-auto-list                         List active auto-passthrough rules"
         echo "  install-blaster <name> [user]  Install Arrow USB Blaster support in VM"
         echo "  install-alchitry <name> [user] Install Alchitry AU udev rules in VM"
         echo "  install-spinalhdl <name> [user]  Install Java/Scala/sbt toolchain in VM"
@@ -866,6 +974,11 @@ case "$ACTION" in
         echo "  $0 usb-attach fpga01 0403:6010 001:011 \"Arrow Blaster\""
         echo "  $0 usb-detach 09fb:6001 \"Altera Blaster\""
         echo "  $0 usb-detach fpga01 0403:6010 \"Arrow USB Blaster TEI0050\""
+        echo "  $0 usb-detach-all pico"
+        echo "  $0 usb-auto pico 2e8a:000a"
+        echo "  $0 usb-auto jop-claude 09fb:6001 \"Altera Blaster\""
+        echo "  $0 usb-auto-remove pico 2e8a:000a"
+        echo "  $0 usb-auto-list"
         echo "  $0 install-blaster jop"
         echo "  $0 install-alchitry jop"
         echo "  $0 install-spinalhdl fpga01"

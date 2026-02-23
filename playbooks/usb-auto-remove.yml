@@ -1,0 +1,104 @@
+---
+# Remove automatic USB device passthrough for a VM.
+# Removes the udev rule and optionally detaches the device.
+#
+# Usage:
+#   ansible-playbook playbooks/usb-auto-remove.yml -e vm_name=pico -e usb_id=2e8a:0005
+#   ansible-playbook playbooks/usb-auto-remove.yml -e vm_name=jop-claude -e usb_id=09fb:6001
+
+- name: Remove USB auto-passthrough
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('') }}"
+    requested_usb_id: "{{ usb_id | default('') }}"
+    udev_rules_dir: /etc/udev/rules.d
+
+  tasks:
+    - name: Validate vm_name
+      fail:
+        msg: "Usage: ansible-playbook playbooks/usb-auto-remove.yml -e vm_name=<name> -e usb_id=<vvvv:pppp>"
+      when: requested_vm_name == ''
+
+    - name: Validate usb_id format
+      fail:
+        msg: "usb_id must be in vvvv:pppp format (e.g. 09fb:6001)"
+      when: >
+        requested_usb_id == '' or
+        requested_usb_id | length != 9 or
+        ':' not in requested_usb_id
+
+    - name: Parse USB vendor and product IDs
+      set_fact:
+        usb_vendor: "{{ requested_usb_id.split(':')[0] | lower }}"
+        usb_product: "{{ requested_usb_id.split(':')[1] | lower }}"
+
+    - name: Find matching udev rules
+      find:
+        paths: "{{ udev_rules_dir }}"
+        patterns: "90-vm-usb-{{ requested_vm_name }}-{{ usb_vendor }}{{ usb_product }}*.rules"
+      register: matching_rules
+
+    - name: Remove udev rules
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ matching_rules.files }}"
+      register: udev_rule_removed
+
+    - name: Reload udev rules
+      command: udevadm control --reload-rules
+      when: udev_rule_removed is changed
+
+    - name: Detach device from VM if currently attached
+      shell: |
+        set -euo pipefail
+
+        vm="{{ requested_vm_name }}"
+        vendor="{{ usb_vendor }}"
+        product="{{ usb_product }}"
+
+        state=$(virsh domstate "$vm" 2>/dev/null || true)
+        if [ "$state" != "running" ]; then
+          echo "vm_not_running"
+          exit 0
+        fi
+
+        if ! virsh dumpxml "$vm" 2>/dev/null | grep -q "0x${vendor}"; then
+          echo "not_attached"
+          exit 0
+        fi
+
+        xml=$(mktemp /tmp/usb-passthrough-XXXXXX.xml)
+        trap 'rm -f "$xml"' EXIT
+
+        cat > "$xml" <<XMLEOF
+        <hostdev mode='subsystem' type='usb' managed='yes'>
+          <source>
+            <vendor id='0x${vendor}'/>
+            <product id='0x${product}'/>
+          </source>
+        </hostdev>
+        XMLEOF
+
+        virsh detach-device "$vm" "$xml" --live 2>/dev/null && echo "detached" || echo "not_attached"
+      args:
+        executable: /bin/bash
+      register: detach_result
+      changed_when: "'detached' in detach_result.stdout"
+
+    - name: Display summary
+      debug:
+        msg: |
+          USB auto-passthrough removed:
+            Device: {{ usb_vendor }}:{{ usb_product }}
+            VM: {{ requested_vm_name }}
+          {% if udev_rule_removed is changed %}
+            Rule removed: {{ udev_rules_dir }}/90-vm-usb-{{ requested_vm_name }}-{{ usb_vendor }}{{ usb_product }}.rules
+          {% else %}
+            Rule was not present (already removed)
+          {% endif %}
+          {% if detach_result.stdout is defined and 'detached' in detach_result.stdout %}
+            Device detached from VM
+          {% endif %}

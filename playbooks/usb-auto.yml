@@ -1,0 +1,495 @@
+---
+# Set up automatic USB device passthrough to a VM.
+# Creates a udev rule on the host that auto-attaches the device when
+# plugged in and auto-detaches when unplugged.
+#
+# Usage:
+#   ansible-playbook playbooks/usb-auto.yml -e vm_name=pico -e usb_id=2e8a:0005
+#   ansible-playbook playbooks/usb-auto.yml -e vm_name=jop-claude -e usb_id=09fb:6001
+#   ansible-playbook playbooks/usb-auto.yml -e vm_name=jop-claude -e usb_id=0403:6010 -e "usb_name='Arrow USB Blaster'"
+
+- name: Set up USB auto-passthrough
+  hosts: localhost
+  become: true
+
+  vars:
+    requested_vm_name: "{{ vm_name | default('') }}"
+    requested_usb_id: "{{ usb_id | default('') }}"
+    requested_usb_name: "{{ usb_name | default('') }}"
+    usb_lock_dir: /var/lock/vm-usb
+    passthrough_script: /usr/local/bin/vm-usb-passthrough
+    udev_rules_dir: /etc/udev/rules.d
+
+  tasks:
+    - name: Validate vm_name
+      fail:
+        msg: "Usage: ansible-playbook playbooks/usb-auto.yml -e vm_name=<name> -e usb_id=<vvvv:pppp>"
+      when: requested_vm_name == ''
+
+    - name: Validate usb_id format
+      fail:
+        msg: "usb_id must be in vvvv:pppp format (e.g. 09fb:6001)"
+      when: >
+        requested_usb_id == '' or
+        requested_usb_id | length != 9 or
+        ':' not in requested_usb_id
+
+    - name: Parse USB vendor and product IDs
+      set_fact:
+        usb_vendor: "{{ requested_usb_id.split(':')[0] | lower }}"
+        usb_product: "{{ requested_usb_id.split(':')[1] | lower }}"
+
+    - name: Check VM existence
+      command: virsh list --all --name
+      register: vm_list
+      changed_when: false
+
+    - name: Fail when VM does not exist
+      fail:
+        msg: "VM '{{ requested_vm_name }}' does not exist."
+      when: requested_vm_name not in vm_list.stdout_lines
+
+    - name: Select USB by name from descriptors
+      shell: |
+        set -euo pipefail
+
+        target_name="{{ requested_usb_name }}"
+        matches=""
+        count=0
+
+        while IFS= read -r line; do
+          bus="$(echo "$line" | awk '{print $2}')"
+          dev="$(echo "$line" | awk '{sub(/:$/, "", $4); print $4}')"
+          desc="$(lsusb -D "/dev/bus/usb/${bus}/${dev}" 2>/dev/null || true)"
+          mfr="$(echo "$desc" | awk -F'  +' '/iManufacturer/ && NF>=3 {print $NF}')"
+          prod="$(echo "$desc" | awk -F'  +' '/iProduct/ && NF>=3 {print $NF}')"
+          full_name="${mfr:+$mfr }${prod}"
+          if echo "$full_name" | grep -qi "$target_name"; then
+            matches="${matches}${bus}:${dev}\n"
+            count=$((count + 1))
+          fi
+        done < <(lsusb -d "{{ requested_usb_id }}" 2>/dev/null || true)
+
+        echo "match_count=$count"
+        if [ "$count" -eq 1 ]; then
+          match="$(printf '%b' "$matches" | head -1)"
+          sel_bus=$(echo "$match" | cut -d: -f1 | sed 's/^0*//')
+          sel_dev=$(echo "$match" | cut -d: -f2 | sed 's/^0*//')
+          echo "selected_bus=$sel_bus"
+          echo "selected_device=$sel_dev"
+          bus_pad=$(printf '%03d' "$sel_bus")
+          dev_pad=$(printf '%03d' "$sel_dev")
+          serial=$(udevadm info "/dev/bus/usb/${bus_pad}/${dev_pad}" 2>/dev/null | awk -F= '/^E: ID_SERIAL_SHORT=/{print $2}')
+          echo "device_serial=${serial:-}"
+        fi
+      args:
+        executable: /bin/bash
+      register: name_match_result
+      changed_when: false
+      when: requested_usb_name != ''
+
+    - name: Fail when name matches multiple devices
+      fail:
+        msg: >
+          Multiple devices matching '{{ requested_usb_name }}' found for {{ requested_usb_id }}.
+          Use usb_addr (BBB:DDD) to specify the exact device, or use a more specific name.
+      when:
+        - requested_usb_name != ''
+        - "'match_count=0' not in name_match_result.stdout"
+        - "'match_count=1' not in name_match_result.stdout"
+
+    - name: Fail when name does not match any device
+      fail:
+        msg: >
+          No device matching name '{{ requested_usb_name }}' found for {{ requested_usb_id }}.
+          Check device name with: lsusb -d {{ requested_usb_id }}
+      when:
+        - requested_usb_name != ''
+        - "'match_count=0' in name_match_result.stdout"
+
+    - name: Set USB serial for disambiguation
+      set_fact:
+        usb_serial: "{{ name_match_result.stdout | regex_search('device_serial=(\\S+)', '\\1') | first }}"
+      when:
+        - requested_usb_name != ''
+        - name_match_result is defined
+        - "'device_serial=' in name_match_result.stdout"
+        - "name_match_result.stdout | regex_search('device_serial=(\\S+)') is not none"
+
+    - name: Default USB serial when no name matching
+      set_fact:
+        usb_serial: ""
+      when: usb_serial is not defined
+
+    - name: Ensure USB lock directory exists
+      file:
+        path: "{{ usb_lock_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Ensure VM has a USB controller
+      shell: |
+        set -euo pipefail
+
+        if virsh dumpxml "{{ requested_vm_name }}" | grep -qi "<controller type='usb'"; then
+          echo "usb_controller=present"
+          exit 0
+        fi
+
+        controller_xml="$(mktemp /tmp/usb-controller-XXXXXX.xml)"
+        cleanup() {
+          rm -f "$controller_xml"
+        }
+        trap cleanup EXIT
+
+        cat > "$controller_xml" <<EOF
+        <controller type='usb' model='qemu-xhci'/>
+        EOF
+
+        virsh attach-device "{{ requested_vm_name }}" "$controller_xml" --config
+        if virsh domstate "{{ requested_vm_name }}" | tr '[:upper:]' '[:lower:]' | grep -q "running"; then
+          virsh attach-device "{{ requested_vm_name }}" "$controller_xml" --live
+        fi
+
+        echo "usb_controller=added"
+      args:
+        executable: /bin/bash
+      register: usb_controller_result
+      changed_when: "'usb_controller=added' in usb_controller_result.stdout"
+
+    - name: Install USB passthrough helper script
+      copy:
+        dest: "{{ passthrough_script }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Auto-passthrough USB device to/from libvirt VM.
+          # Called by udev rules created via: ./vm usb-auto
+          set -euo pipefail
+
+          ACTION="${1:-}"
+          VM="${2:-}"
+          VENDOR="${3:-}"
+          PRODUCT="${4:-}"
+          SERIAL="${5:-}"
+
+          [ -n "$ACTION" ] && [ -n "$VM" ] && [ -n "$VENDOR" ] && [ -n "$PRODUCT" ] || exit 1
+
+          LOCK_DIR="/var/lock/vm-usb"
+          mkdir -p "$LOCK_DIR"
+          LOCK_FILE="$LOCK_DIR/${VENDOR}-${PRODUCT}.lock"
+
+          exec 9>"$LOCK_FILE"
+          flock -w 10 9 || exit 1
+
+          log() { logger -t vm-usb-passthrough "$@"; }
+          log "$ACTION $VM $VENDOR:$PRODUCT${SERIAL:+ serial=$SERIAL}"
+
+          # Find USB device in sysfs by vendor:product and optional serial.
+          # Sets FOUND_BUS and FOUND_DEV on success, returns 1 if not found.
+          find_usb_device() {
+            local v="$1" p="$2" s="${3:-}"
+            for d in /sys/bus/usb/devices/[0-9]*; do
+              [ -f "$d/idVendor" ] || continue
+              [ "$(cat "$d/idVendor")" = "$v" ] || continue
+              [ "$(cat "$d/idProduct")" = "$p" ] || continue
+              if [ -n "$s" ]; then
+                [ "$(cat "$d/serial" 2>/dev/null)" = "$s" ] || continue
+              fi
+              FOUND_BUS=$(cat "$d/busnum")
+              FOUND_DEV=$(cat "$d/devnum")
+              return 0
+            done
+            return 1
+          }
+
+          RULES_DIR="/etc/udev/rules.d"
+
+          # Detach stale USB devices from VM by scanning other auto-passthrough
+          # rules for this VM and detaching any that aren't the current device.
+          cleanup_stale() {
+            local vm="$1"
+            local cur_vendor="$2"
+            local cur_product="$3"
+
+            local tmpxml
+            tmpxml=$(mktemp /tmp/usb-cleanup-XXXXXX.xml)
+
+            for rule in "$RULES_DIR"/90-vm-usb-"${vm}"-*.rules; do
+              [ -f "$rule" ] || continue
+
+              # Extract vendor+product from filename: 90-vm-usb-<vm>-<vvvvpppp>.rules
+              local devid
+              devid=$(echo "$rule" | sed 's/.*-\([0-9a-f]\{8\}\)\.rules$/\1/')
+              echo "$devid" | grep -qE '^[0-9a-f]{8}$' || continue
+
+              local v="${devid:0:4}"
+              local p="${devid:4:4}"
+
+              # Skip the device we're about to attach
+              [ "$v" = "$cur_vendor" ] && [ "$p" = "$cur_product" ] && continue
+
+              cat > "$tmpxml" <<DXML
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <vendor id='0x${v}'/>
+              <product id='0x${p}'/>
+            </source>
+          </hostdev>
+          DXML
+
+              if virsh -c qemu:///system detach-device "$vm" "$tmpxml" --live 2>/dev/null; then
+                log "Detached stale $v:$p from $vm"
+              fi
+            done
+
+            rm -f "$tmpxml"
+          }
+
+          case "$ACTION" in
+            attach)
+              state=$(virsh -c qemu:///system domstate "$VM" 2>/dev/null || true)
+              if [ "$state" != "running" ]; then
+                log "VM $VM not running, skipping attach of $VENDOR:$PRODUCT"
+                exit 0
+              fi
+
+              sleep 1
+
+              # Detach stale devices from other auto-passthrough rules
+              cleanup_stale "$VM" "$VENDOR" "$PRODUCT"
+
+              xml=$(mktemp /tmp/usb-passthrough-XXXXXX.xml)
+              trap "rm -f '$xml'" EXIT
+
+              if [ -n "$SERIAL" ]; then
+                # Serial specified: find exact device in sysfs
+                if ! find_usb_device "$VENDOR" "$PRODUCT" "$SERIAL"; then
+                  log "Device $VENDOR:$PRODUCT serial $SERIAL not found on host"
+                  exit 0
+                fi
+                cat > "$xml" <<XMLEOF
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <address bus='${FOUND_BUS}' device='${FOUND_DEV}'/>
+            </source>
+          </hostdev>
+          XMLEOF
+              else
+                dev_lines=$(lsusb -d "${VENDOR}:${PRODUCT}" 2>/dev/null || true)
+                dev_count=$(echo "$dev_lines" | grep -c . || true)
+                dev_line=$(echo "$dev_lines" | head -1)
+
+                if [ -z "$dev_line" ]; then
+                  log "Device $VENDOR:$PRODUCT not found on host"
+                  exit 0
+                fi
+
+                if [ "$dev_count" -eq 1 ]; then
+                  # Single device: use vendor:product - QEMU handles disconnect cleanly
+                  cat > "$xml" <<XMLEOF
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <vendor id='0x${VENDOR}'/>
+              <product id='0x${PRODUCT}'/>
+            </source>
+          </hostdev>
+          XMLEOF
+                else
+                  # Multiple devices without serial: use bus:device for first match
+                  bus=$(echo "$dev_line" | awk '{print $2+0}')
+                  device=$(echo "$dev_line" | awk -F'[ :]' '{print $4+0}')
+                  cat > "$xml" <<XMLEOF
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <address bus='${bus}' device='${device}'/>
+            </source>
+          </hostdev>
+          XMLEOF
+                  log "Multiple devices for $VENDOR:$PRODUCT, using bus:device addressing"
+                fi
+              fi
+
+              err=$(virsh -c qemu:///system attach-device "$VM" "$xml" --live 2>&1) && {
+                log "Attached $VENDOR:$PRODUCT to $VM"
+
+                # Launch watcher in its own systemd scope (survives udev cgroup cleanup)
+                systemd-run --quiet --scope -- \
+                  /usr/local/bin/vm-usb-passthrough watch "$VM" "$VENDOR" "$PRODUCT" "$SERIAL" &
+              } || {
+                log "Failed to attach $VENDOR:$PRODUCT to $VM: $err"
+              }
+              ;;
+
+            detach)
+              state=$(virsh -c qemu:///system domstate "$VM" 2>/dev/null || true)
+              if [ "$state" != "running" ]; then
+                log "VM $VM not running, skipping detach of $VENDOR:$PRODUCT"
+                exit 0
+              fi
+
+              xml=$(mktemp /tmp/usb-passthrough-XXXXXX.xml)
+              trap "rm -f '$xml'" EXIT
+
+              if [ -n "$SERIAL" ] && find_usb_device "$VENDOR" "$PRODUCT" "$SERIAL"; then
+                cat > "$xml" <<XMLEOF
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <address bus='${FOUND_BUS}' device='${FOUND_DEV}'/>
+            </source>
+          </hostdev>
+          XMLEOF
+              else
+                cat > "$xml" <<XMLEOF
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <vendor id='0x${VENDOR}'/>
+              <product id='0x${PRODUCT}'/>
+            </source>
+          </hostdev>
+          XMLEOF
+              fi
+
+              err=$(virsh -c qemu:///system detach-device "$VM" "$xml" --live 2>&1) && {
+                log "Detached $VENDOR:$PRODUCT from $VM"
+              } || {
+                log "Detach $VENDOR:$PRODUCT from $VM failed: $err"
+              }
+              ;;
+
+            watch)
+              # Poll until device disappears from host, then detach from VM.
+              # Launched via systemd-run from the attach action.
+              exec 9>&-
+              set +e
+
+              log "Watcher started for $VENDOR:$PRODUCT${SERIAL:+ serial=$SERIAL} on $VM"
+
+              while sleep 2; do
+                virsh -c qemu:///system domstate "$VM" 2>/dev/null | grep -q running || { log "Watcher: VM $VM not running"; break; }
+
+                if [ -n "$SERIAL" ]; then
+                  find_usb_device "$VENDOR" "$PRODUCT" "$SERIAL" && continue
+                else
+                  lsusb -d "${VENDOR}:${PRODUCT}" >/dev/null 2>&1 && continue
+                fi
+
+                log "Watcher: $VENDOR:$PRODUCT${SERIAL:+ serial=$SERIAL} gone from host, detaching from $VM"
+
+                xml=$(mktemp /tmp/usb-watch-XXXXXX.xml)
+                if [ -n "$SERIAL" ]; then
+                  # Device gone - try to find it in VM's live XML by vendor:product
+                  cat > "$xml" <<XMLEOF
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <vendor id='0x${VENDOR}'/>
+              <product id='0x${PRODUCT}'/>
+            </source>
+          </hostdev>
+          XMLEOF
+                else
+                  cat > "$xml" <<XMLEOF
+          <hostdev mode='subsystem' type='usb' managed='yes'>
+            <source>
+              <vendor id='0x${VENDOR}'/>
+              <product id='0x${PRODUCT}'/>
+            </source>
+          </hostdev>
+          XMLEOF
+                fi
+
+                err=$(virsh -c qemu:///system detach-device "$VM" "$xml" --live 2>&1) && {
+                  log "Watcher: detached $VENDOR:$PRODUCT from $VM"
+                } || {
+                  log "Watcher: detach failed: $err"
+                }
+                rm -f "$xml"
+                break
+              done
+
+              rm -f "$xml"
+              log "Watcher exiting for $VENDOR:$PRODUCT"
+              ;;
+          esac
+
+    - name: Create udev rule for auto-passthrough
+      copy:
+        dest: "{{ udev_rules_dir }}/90-vm-usb-{{ requested_vm_name }}-{{ usb_vendor }}{{ usb_product }}{{ '-' + usb_serial if usb_serial else '' }}.rules"
+        mode: '0644'
+        content: |
+          # Auto-passthrough USB {{ usb_vendor }}:{{ usb_product }}{{ ' serial ' + usb_serial if usb_serial else '' }} to VM {{ requested_vm_name }}
+          {% if usb_serial %}
+          ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="{{ usb_vendor }}", ATTR{idProduct}=="{{ usb_product }}", ATTR{serial}=="{{ usb_serial }}", RUN+="/bin/sh -c '{{ passthrough_script }} attach {{ requested_vm_name }} {{ usb_vendor }} {{ usb_product }} {{ usb_serial }} &'"
+          ACTION=="remove", SUBSYSTEM=="usb", ENV{ID_VENDOR_ID}=="{{ usb_vendor }}", ENV{ID_MODEL_ID}=="{{ usb_product }}", ENV{ID_SERIAL_SHORT}=="{{ usb_serial }}", RUN+="/bin/sh -c '{{ passthrough_script }} detach {{ requested_vm_name }} {{ usb_vendor }} {{ usb_product }} {{ usb_serial }} &'"
+          {% else %}
+          ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="{{ usb_vendor }}", ATTR{idProduct}=="{{ usb_product }}", RUN+="/bin/sh -c '{{ passthrough_script }} attach {{ requested_vm_name }} {{ usb_vendor }} {{ usb_product }} &'"
+          ACTION=="remove", SUBSYSTEM=="usb", ENV{ID_VENDOR_ID}=="{{ usb_vendor }}", ENV{ID_MODEL_ID}=="{{ usb_product }}", RUN+="/bin/sh -c '{{ passthrough_script }} detach {{ requested_vm_name }} {{ usb_vendor }} {{ usb_product }} &'"
+          {% endif %}
+      register: udev_rule
+
+    - name: Reload udev rules
+      shell: udevadm control --reload-rules && udevadm trigger --action=add --attr-match=idVendor={{ usb_vendor }} --attr-match=idProduct={{ usb_product }}
+      when: udev_rule is changed
+
+    - name: Attach device now if plugged in and VM running
+      shell: |
+        set -euo pipefail
+
+        state=$(virsh domstate "{{ requested_vm_name }}" 2>/dev/null || true)
+        if [ "$state" != "running" ]; then
+          echo "vm_not_running"
+          exit 0
+        fi
+
+        dev_line=$(lsusb -d "{{ usb_vendor }}:{{ usb_product }}" 2>/dev/null | head -1 || true)
+        if [ -z "$dev_line" ]; then
+          echo "device_not_present"
+          exit 0
+        fi
+
+        bus=$(echo "$dev_line" | awk '{print $2+0}')
+        device=$(echo "$dev_line" | awk -F'[ :]' '{print $4+0}')
+
+        # Check if already attached
+        if virsh dumpxml "{{ requested_vm_name }}" 2>/dev/null | grep -q "bus='${bus}' device='${device}'"; then
+          echo "already_attached"
+          exit 0
+        fi
+
+        xml=$(mktemp /tmp/usb-passthrough-XXXXXX.xml)
+        trap "rm -f '$xml'" EXIT
+
+        cat > "$xml" <<EOF
+        <hostdev mode='subsystem' type='usb' managed='yes'>
+          <source>
+            <address bus='${bus}' device='${device}'/>
+          </source>
+        </hostdev>
+        EOF
+
+        virsh attach-device "{{ requested_vm_name }}" "$xml" --live 2>/dev/null && echo "attached" || echo "attach_failed"
+      args:
+        executable: /bin/bash
+      register: initial_attach
+      changed_when: "'attached' in initial_attach.stdout"
+      ignore_errors: true
+
+    - name: Display summary
+      debug:
+        msg: |
+          USB auto-passthrough configured:
+            Device: {{ usb_vendor }}:{{ usb_product }}
+            VM: {{ requested_vm_name }}
+            Rule: {{ udev_rules_dir }}/90-vm-usb-{{ requested_vm_name }}-{{ usb_vendor }}{{ usb_product }}.rules
+          {% if initial_attach.stdout is defined and 'attached' in initial_attach.stdout %}
+            Status: Device attached to VM now
+          {% elif initial_attach.stdout is defined and 'already_attached' in initial_attach.stdout %}
+            Status: Device already attached to VM
+          {% elif initial_attach.stdout is defined and 'device_not_present' in initial_attach.stdout %}
+            Status: Device not currently plugged in (will auto-attach on plug)
+          {% elif initial_attach.stdout is defined and 'vm_not_running' in initial_attach.stdout %}
+            Status: VM not running (will auto-attach when VM running and device plugged in)
+          {% else %}
+            Status: Rule configured (will auto-attach on plug)
+          {% endif %}
+          Note: If VM is restarted with device plugged in, replug the device to trigger auto-attach.
