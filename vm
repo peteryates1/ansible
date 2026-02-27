@@ -46,6 +46,7 @@
 #   ./vm share-dir jop /opt/xilinx/2025.2 /opt/xilinx/2025.2  # Share host dir with explicit mount point
 #   ./vm mount-shares jop01          # Restart VM and mount all attached shares
 #   ./vm setup jop01 jop-dev         # Run post-creation setup (share dirs, install toolchains)
+#   ./vm gui                         # Launch graphical VM manager
 #   ./vm mirror add https://github.com/jop-devel/jop.git      # Clone a repo to /srv/git
 #   ./vm mirror list                                           # List all repos
 #   ./vm mirror sync [repo]                                    # Pull updates for all or one repo
@@ -861,6 +862,9 @@ case "$ACTION" in
                 ;;
         esac
         ;;
+    gui)
+        exec python3 "$(dirname "$0")/gui/main.py"
+        ;;
     setup)
         if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
             echo "Usage: $0 setup <vm_name> <type>"
@@ -938,6 +942,7 @@ case "$ACTION" in
         echo "  share-dir <name> <host_dir> [mount_point]  Share host dir into VM (read-only)"
         echo "  mount-shares <name>        Restart VM and mount all attached shares"
         echo "  setup <name> <type>        Run post-creation setup (types: jop-dev)"
+        echo "  gui                        Launch graphical VM manager"
         echo ""
         echo "Mirror Commands:"
         echo "  mirror add <git-url>   Clone a repo to /srv/git"

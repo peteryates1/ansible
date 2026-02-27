@@ -229,6 +229,9 @@
           log() { logger -t vm-usb-passthrough "$@"; }
           log "$ACTION $VM $VENDOR:$PRODUCT${SERIAL:+ serial=$SERIAL}"
 
+          # User with SSH access to guest VMs (for xHCI recovery)
+          GUEST_SSH_USER="{{ lookup('env', 'USER') }}"
+
           # Find USB device in sysfs by vendor:product and optional serial.
           # Sets FOUND_BUS and FOUND_DEV on success, returns 1 if not found.
           find_usb_device() {
@@ -249,8 +252,10 @@
 
           RULES_DIR="/etc/udev/rules.d"
 
-          # Detach stale USB devices from VM by scanning other auto-passthrough
-          # rules for this VM and detaching any that aren't the current device.
+          # Detach stale USB devices from VM that are no longer present on host.
+          # Only detaches devices from other auto-passthrough rules for the same
+          # VM when the device is NOT currently plugged in (e.g. Pico mode switch
+          # from 000a to 0003 leaves a stale 000a hostdev).
           cleanup_stale() {
             local vm="$1"
             local cur_vendor="$2"
@@ -273,6 +278,11 @@
               # Skip the device we're about to attach
               [ "$v" = "$cur_vendor" ] && [ "$p" = "$cur_product" ] && continue
 
+              # Only detach if the device is NOT currently on the host
+              if lsusb -d "${v}:${p}" >/dev/null 2>&1; then
+                continue
+              fi
+
               cat > "$tmpxml" <<DXML
           <hostdev mode='subsystem' type='usb' managed='yes'>
             <source>
@@ -288,6 +298,78 @@
             done
 
             rm -f "$tmpxml"
+          }
+
+          # Run a command inside a guest VM via SSH.
+          # Uses $GUEST_SSH_USER's SSH keys and config.
+          guest_ssh() {
+            local vm="$1"
+            shift
+            local cmd="$*"
+            su - "$GUEST_SSH_USER" -c "ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no '${vm}' '${cmd}'" 2>/dev/null
+          }
+
+          # Verify guest sees the USB device after attach.
+          # If the guest xHCI controller is stuck (device invisible despite
+          # QEMU having it), recover by detaching, resetting the guest xHCI
+          # PCI driver, and re-attaching.
+          recover_guest_xhci() {
+            local vm="$1" v="$2" p="$3" attach_xml="$4"
+
+            # Check SSH access - if unavailable, skip silently
+            if ! guest_ssh "$vm" "true" >/dev/null 2>&1; then
+              return 0
+            fi
+
+            sleep 3
+
+            # Guest sees the device - no recovery needed
+            if guest_ssh "$vm" "lsusb -d ${v}:${p}" >/dev/null 2>&1; then
+              log "Guest $vm sees ${v}:${p}"
+              return 0
+            fi
+
+            log "Guest $vm cannot see ${v}:${p} - xHCI likely stuck, recovering"
+
+            # Find xHCI PCI address from VM XML
+            local xhci_pci
+            xhci_pci=$(virsh -c qemu:///system dumpxml "$vm" 2>/dev/null | \
+              grep -A3 "model='qemu-xhci'" | grep "address type='pci'" | \
+              sed "s/.*domain='\([^']*\)' bus='\([^']*\)' slot='\([^']*\)' function='\([^']*\)'.*/\1:\2:\3.\4/" | \
+              sed 's/0x//g')
+
+            if [ -z "$xhci_pci" ]; then
+              log "Cannot find xHCI PCI address for $vm"
+              return 1
+            fi
+
+            # 1. Detach device from QEMU
+            virsh -c qemu:///system detach-device "$vm" "$attach_xml" --live 2>/dev/null || true
+            sleep 1
+
+            # 2. Reset guest xHCI controller
+            log "Resetting guest xHCI $xhci_pci"
+            guest_ssh "$vm" "echo ${xhci_pci} | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind >/dev/null" || true
+            sleep 1
+            guest_ssh "$vm" "echo ${xhci_pci} | sudo tee /sys/bus/pci/drivers/xhci_hcd/bind >/dev/null" || true
+            sleep 2
+
+            # 3. Re-attach device
+            if ! virsh -c qemu:///system attach-device "$vm" "$attach_xml" --live 2>/dev/null; then
+              log "xHCI recovery: re-attach ${v}:${p} failed"
+              return 1
+            fi
+
+            sleep 3
+
+            # 4. Verify guest sees it now
+            if guest_ssh "$vm" "lsusb -d ${v}:${p}" >/dev/null 2>&1; then
+              log "xHCI recovery successful - guest $vm sees ${v}:${p}"
+              return 0
+            fi
+
+            log "xHCI recovery failed - guest $vm still cannot see ${v}:${p}"
+            return 1
           }
 
           case "$ACTION" in
@@ -372,6 +454,9 @@
               }
 
               if [ "$start_watcher" -eq 1 ]; then
+                # Verify guest sees the device, recover xHCI if stuck
+                recover_guest_xhci "$VM" "$VENDOR" "$PRODUCT" "$xml" || true
+
                 # Launch watcher in its own systemd scope (survives udev cgroup cleanup)
                 systemd-run --quiet --scope -- \
                   /usr/local/bin/vm-usb-passthrough watch "$VM" "$VENDOR" "$PRODUCT" "$SERIAL" \
