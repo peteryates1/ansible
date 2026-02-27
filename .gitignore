@@ -26,6 +26,10 @@ network-config
 .env
 .claude/
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Editor and OS files
 *.swp
 *.swo
