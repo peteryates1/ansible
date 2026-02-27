@@ -61,8 +61,8 @@
           bus="$(echo "$line" | awk '{print $2}')"
           dev="$(echo "$line" | awk '{sub(/:$/, "", $4); print $4}')"
           desc="$(lsusb -D "/dev/bus/usb/${bus}/${dev}" 2>/dev/null || true)"
-          mfr="$(echo "$desc" | awk -F'  +' '/iManufacturer/ && NF>=3 {print $NF}')"
-          prod="$(echo "$desc" | awk -F'  +' '/iProduct/ && NF>=3 {print $NF}')"
+          mfr="$(echo "$desc" | sed -n 's/.*iManufacturer[[:space:]]*[0-9]*[[:space:]]//p')"
+          prod="$(echo "$desc" | sed -n 's/.*iProduct[[:space:]]*[0-9]*[[:space:]]//p')"
           full_name="${mfr:+$mfr }${prod}"
           if echo "$full_name" | grep -qi "$target_name"; then
             matches="${matches}${bus}:${dev}\n"
@@ -583,14 +583,33 @@
           exit 0
         fi
 
-        dev_line=$(lsusb -d "{{ usb_vendor }}:{{ usb_product }}" 2>/dev/null | head -1 || true)
-        if [ -z "$dev_line" ]; then
+        serial="{{ usb_serial | default('') }}"
+        bus=""
+        device=""
+
+        if [ -n "$serial" ]; then
+          # Find specific device by serial in sysfs
+          for d in /sys/bus/usb/devices/[0-9]*; do
+            [ -f "$d/idVendor" ] || continue
+            [ "$(cat "$d/idVendor")" = "{{ usb_vendor }}" ] || continue
+            [ "$(cat "$d/idProduct")" = "{{ usb_product }}" ] || continue
+            [ "$(cat "$d/serial" 2>/dev/null)" = "$serial" ] || continue
+            bus=$(cat "$d/busnum")
+            device=$(cat "$d/devnum")
+            break
+          done
+        else
+          dev_line=$(lsusb -d "{{ usb_vendor }}:{{ usb_product }}" 2>/dev/null | head -1 || true)
+          if [ -n "$dev_line" ]; then
+            bus=$(echo "$dev_line" | awk '{print $2+0}')
+            device=$(echo "$dev_line" | awk -F'[ :]' '{print $4+0}')
+          fi
+        fi
+
+        if [ -z "$bus" ] || [ -z "$device" ]; then
           echo "device_not_present"
           exit 0
         fi
-
-        bus=$(echo "$dev_line" | awk '{print $2+0}')
-        device=$(echo "$dev_line" | awk -F'[ :]' '{print $4+0}')
 
         # Check if already attached
         if virsh dumpxml "{{ requested_vm_name }}" 2>/dev/null | grep -q "bus='${bus}' device='${device}'"; then
