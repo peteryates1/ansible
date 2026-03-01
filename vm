@@ -29,6 +29,7 @@
 #   ./vm usb-auto jop-claude 09fb:6001 "Altera Blaster"             # Auto-passthrough with name filter
 #   ./vm usb-auto-remove pico 2e8a:000a                             # Remove auto-passthrough
 #   ./vm usb-auto-list                                               # List active auto-passthrough rules
+#   ./vm usb-fix pico                                                 # Fix stuck guest USB (xHCI reset)
 #   ./vm usb-watchers                                                # List active unplug watchers
 #   ./vm usb-watchers clean                                          # Kill all stale watchers
 #   ./vm install-blaster jop [user]     # Install Arrow USB Blaster support in VM
@@ -627,6 +628,93 @@ case "$ACTION" in
             fi
         fi
         ;;
+    usb-fix)
+        if [ -z "$VM_NAME" ]; then
+            echo "Usage: $0 usb-fix <vm_name>"
+            echo "Resets the guest USB (xHCI) controller and re-attaches all USB devices."
+            echo "Fixes stuck xHCI state where QEMU has devices but guest can't see them."
+            exit 1
+        fi
+
+        state=$(virsh domstate "$VM_NAME" 2>/dev/null || true)
+        if [ "$state" != "running" ]; then
+            echo "Error: VM '$VM_NAME' is not running."
+            exit 1
+        fi
+
+        # Get VM IP for SSH
+        VM_IP=$(virsh domifaddr "$VM_NAME" 2>/dev/null | awk '/ipv4/ {split($4,a,"/"); print a[1]}' | head -1)
+        if [ -z "$VM_IP" ]; then
+            VM_IP="$VM_NAME"
+        fi
+
+        # Collect currently attached USB hostdevs
+        hostdevs=$(virsh dumpxml "$VM_NAME" 2>/dev/null | awk '
+            /<hostdev mode=.subsystem. type=.usb./{found=1; xml=""}
+            found{xml=xml $0 "\n"}
+            found && /<\/hostdev>/{print xml; found=0}
+        ')
+
+        if [ -z "$hostdevs" ]; then
+            echo "No USB devices attached to $VM_NAME."
+            exit 0
+        fi
+
+        dev_count=$(echo "$hostdevs" | grep -c '<hostdev' || true)
+        echo "Found $dev_count USB device(s) attached to $VM_NAME"
+
+        # Find xHCI PCI address from VM XML
+        xhci_pci=$(virsh dumpxml "$VM_NAME" 2>/dev/null | \
+            grep -A3 "model='qemu-xhci'" | grep "address type='pci'" | \
+            sed "s/.*domain='\([^']*\)' bus='\([^']*\)' slot='\([^']*\)' function='\([^']*\)'.*/\1:\2:\3.\4/" | \
+            sed 's/0x//g')
+
+        if [ -z "$xhci_pci" ]; then
+            echo "Error: Cannot find xHCI PCI address for $VM_NAME"
+            exit 1
+        fi
+
+        # Save each hostdev to a temp file for detach/re-attach
+        tmpdir=$(mktemp -d /tmp/usb-fix-XXXXXX)
+        trap "rm -rf '$tmpdir'" EXIT
+        echo "$hostdevs" | awk -v dir="$tmpdir" '
+            /<hostdev/{n++; f=dir "/dev" n ".xml"}
+            f{print > f}
+            /<\/hostdev>/{close(f); f=""}
+        '
+
+        # 1. Detach all USB devices
+        echo "Detaching USB devices..."
+        for f in "$tmpdir"/dev*.xml; do
+            [ -f "$f" ] || continue
+            virsh detach-device "$VM_NAME" "$f" --live 2>/dev/null && echo "  Detached $(grep -o "bus='[0-9]*' device='[0-9]*'" "$f")" || true
+        done
+
+        sleep 1
+
+        # 2. Reset guest xHCI controller
+        echo "Resetting guest xHCI controller ($xhci_pci)..."
+        ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$VM_IP" \
+            "echo $xhci_pci | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind >/dev/null" 2>/dev/null
+        sleep 1
+        ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$VM_IP" \
+            "echo $xhci_pci | sudo tee /sys/bus/pci/drivers/xhci_hcd/bind >/dev/null" 2>/dev/null
+        sleep 2
+
+        # 3. Re-attach all USB devices
+        echo "Re-attaching USB devices..."
+        for f in "$tmpdir"/dev*.xml; do
+            [ -f "$f" ] || continue
+            virsh attach-device "$VM_NAME" "$f" --live 2>/dev/null && echo "  Attached $(grep -o "bus='[0-9]*' device='[0-9]*'" "$f")" || echo "  Failed: $(cat "$f")"
+        done
+
+        sleep 2
+
+        # 4. Verify
+        echo ""
+        echo "Guest USB devices:"
+        ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$VM_IP" "lsusb" 2>/dev/null || echo "  (could not SSH to verify)"
+        ;;
     install-blaster)
         if [ -z "$VM_NAME" ]; then
             echo "Usage: $0 install-blaster <vm_name> [vm_user]"
@@ -930,6 +1018,7 @@ case "$ACTION" in
         echo "  usb-auto <name> <usb_id> [usb_name]  Auto-passthrough USB device to VM (udev)"
         echo "  usb-auto-remove <name> <usb_id>      Remove USB auto-passthrough"
         echo "  usb-auto-list                         List active auto-passthrough rules"
+        echo "  usb-fix <name>        Fix stuck guest USB (reset xHCI controller)"
         echo "  install-blaster <name> [user]  Install Arrow USB Blaster support in VM"
         echo "  install-alchitry <name> [user] Install Alchitry AU udev rules in VM"
         echo "  install-spinalhdl <name> [user]  Install Java/Scala/sbt toolchain in VM"
