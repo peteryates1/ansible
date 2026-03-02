@@ -1,4 +1,6 @@
 from gui.workers.playbook_worker import PlaybookWorker
+from gui.workers.chained_playbook_worker import ChainedPlaybookWorker
+from gui.constants import VM_USER
 
 
 class PlaybookService:
@@ -6,6 +8,7 @@ class PlaybookService:
     def run_share_dir(vm_name, host_dir, mount_point=None, config_only=False):
         extra_vars = {
             'vm_name': vm_name,
+            'vm_user': VM_USER,
             'host_dir': host_dir,
             'mount_point': mount_point or host_dir,
         }
@@ -51,4 +54,22 @@ class PlaybookService:
 
     @staticmethod
     def run_mount_shares(vm_name):
-        return PlaybookWorker('mount-shares', {'vm_name': vm_name})
+        return PlaybookWorker('mount-shares', {
+            'vm_name': vm_name,
+            'vm_user': VM_USER,
+        })
+
+    @staticmethod
+    def run_install(playbook_name, vm_name):
+        return PlaybookWorker(playbook_name, {
+            'vm_name': vm_name,
+            'vm_user': VM_USER,
+        })
+
+    @staticmethod
+    def run_install_batch(playbook_name, vm_names):
+        tasks = [
+            (playbook_name, {'vm_name': name, 'vm_user': VM_USER})
+            for name in vm_names
+        ]
+        return ChainedPlaybookWorker(tasks)
