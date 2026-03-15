@@ -2,12 +2,14 @@ from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTableView, QHeaderView, QPushButton, QGroupBox,
-    QLabel, QMessageBox, QAbstractItemView,
+    QLabel, QMessageBox, QAbstractItemView, QComboBox,
 )
 
 from gui.models.vm_model import VMTableModel
 from gui.services.libvirt_service import LibvirtService
-from gui.constants import REFRESH_INTERVAL_MS, SOFTWARE_REGISTRY, VM_USER
+from gui.constants import (
+    REFRESH_INTERVAL_MS, SOFTWARE_REGISTRY, TARGET_USER_CHOICES, VM_USER,
+)
 
 
 class VMPanel(QWidget):
@@ -93,6 +95,15 @@ class VMPanel(QWidget):
         self._software_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._software_detail_model = None
         software_layout.addWidget(self._software_table)
+
+        user_row = QHBoxLayout()
+        user_row.addWidget(QLabel("Target user:"))
+        self._target_user_combo = QComboBox()
+        self._target_user_combo.setEditable(True)
+        self._target_user_combo.addItems(TARGET_USER_CHOICES)
+        self._target_user_combo.setCurrentText(VM_USER)
+        user_row.addWidget(self._target_user_combo)
+        software_layout.addLayout(user_row)
 
         self._install_btn = QPushButton("Install Selected")
         self._install_btn.setEnabled(False)
@@ -268,27 +279,33 @@ class VMPanel(QWidget):
             self._show_software_detail(results)
 
     def _show_software_detail(self, results):
+        from gui.models.vm_detail_models import SoftwareDetailModel
+        items = []
+        for entry in SOFTWARE_REGISTRY:
+            if entry.get('detect_cmd') is None:
+                status = 'available'
+            else:
+                status = results.get(entry['key'], '-')
+            items.append({
+                'key': entry['key'],
+                'label': entry['label'],
+                'playbook': entry['playbook'],
+                'needs_user': entry.get('needs_user', False),
+                'status': status,
+            })
+
         # Skip rebuild if the model already shows the same data
         if self._software_detail_model is not None:
             same = all(
                 self._software_detail_model.get_item(i)
                 and self._software_detail_model.get_item(i)['status']
-                == results.get(SOFTWARE_REGISTRY[i]['key'], '-')
-                for i in range(len(SOFTWARE_REGISTRY))
+                == items[i]['status']
+                for i in range(len(items))
             )
             if same:
                 return
 
-        from gui.models.vm_detail_models import SoftwareDetailModel
         selected_row = self._software_table.currentIndex().row()
-        items = []
-        for entry in SOFTWARE_REGISTRY:
-            items.append({
-                'key': entry['key'],
-                'label': entry['label'],
-                'playbook': entry['playbook'],
-                'status': results.get(entry['key'], '-'),
-            })
         self._software_detail_model = SoftwareDetailModel(items)
         self._software_table.setModel(self._software_detail_model)
         self._software_table.horizontalHeader().setSectionResizeMode(
@@ -298,7 +315,7 @@ class VMPanel(QWidget):
         if 0 <= selected_row < len(items):
             self._software_table.selectRow(selected_row)
         has_installable = any(
-            i['status'] == 'not installed' for i in items
+            i['status'] in ('not installed', 'available') for i in items
         )
         self._install_btn.setEnabled(has_installable)
 
@@ -373,7 +390,7 @@ class VMPanel(QWidget):
             )
             return
         item = self._software_detail_model.get_item(idx.row())
-        if item is None or item['status'] != 'not installed':
+        if item is None or item['status'] not in ('not installed', 'available'):
             QMessageBox.information(
                 self, "Install Software",
                 "Select a software item that is not installed."
@@ -392,15 +409,28 @@ class VMPanel(QWidget):
             )
             return
 
+        # Determine target user for playbooks that need one
+        target_user = None
+        if item.get('needs_user'):
+            target_user = self._target_user_combo.currentText().strip()
+            if not target_user:
+                QMessageBox.information(
+                    self, "Install Software",
+                    "Enter a target user name."
+                )
+                return
+
         from gui.services.playbook_service import PlaybookService
         from gui.views.dialogs.operation_dialog import OperationDialog
 
         vm_names = [v['name'] for v in target_vms]
         if len(vm_names) == 1:
-            worker = PlaybookService.run_install(item['playbook'], vm_names[0])
+            worker = PlaybookService.run_install(
+                item['playbook'], vm_names[0], target_user
+            )
         else:
             worker = PlaybookService.run_install_batch(
-                item['playbook'], vm_names
+                item['playbook'], vm_names, target_user
             )
 
         label = item['label']

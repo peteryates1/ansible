@@ -37,6 +37,7 @@ class ShareDetailModel(QAbstractTableModel):
 STATUS_COLORS = {
     'installed': QColor('#4CAF50'),
     'not installed': QColor('#9E9E9E'),
+    'available': QColor('#2196F3'),
     'checking...': QColor('#FF9800'),
     '-': QColor('#9E9E9E'),
 }

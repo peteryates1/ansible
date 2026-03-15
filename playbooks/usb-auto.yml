@@ -7,6 +7,7 @@
 #   ansible-playbook playbooks/usb-auto.yml -e vm_name=pico -e usb_id=2e8a:0005
 #   ansible-playbook playbooks/usb-auto.yml -e vm_name=jop-claude -e usb_id=09fb:6001
 #   ansible-playbook playbooks/usb-auto.yml -e vm_name=jop-claude -e usb_id=0403:6010 -e "usb_name='Arrow USB Blaster'"
+#   ansible-playbook playbooks/usb-auto.yml -e vm_name=pico1 -e usb_id=2e8a:000a -e usb_serial=E661234
 
 - name: Set up USB auto-passthrough
   hosts: localhost
@@ -16,6 +17,7 @@
     requested_vm_name: "{{ vm_name | default('') }}"
     requested_usb_id: "{{ usb_id | default('') }}"
     requested_usb_name: "{{ usb_name | default('') }}"
+    requested_usb_serial: "{{ usb_serial | default('') }}"
     usb_lock_dir: /var/lock/vm-usb
     passthrough_script: /usr/local/bin/vm-usb-passthrough
     udev_rules_dir: /etc/udev/rules.d
@@ -48,6 +50,11 @@
       fail:
         msg: "VM '{{ requested_vm_name }}' does not exist."
       when: requested_vm_name not in vm_list.stdout_lines
+
+    - name: Use directly provided serial
+      set_fact:
+        usb_serial: "{{ requested_usb_serial }}"
+      when: requested_usb_serial != ''
 
     - name: Select USB by name from descriptors
       shell: |
@@ -86,14 +93,15 @@
         executable: /bin/bash
       register: name_match_result
       changed_when: false
-      when: requested_usb_name != ''
+      when: requested_usb_serial == '' and requested_usb_name != ''
 
     - name: Fail when name matches multiple devices
       fail:
         msg: >
           Multiple devices matching '{{ requested_usb_name }}' found for {{ requested_usb_id }}.
-          Use usb_addr (BBB:DDD) to specify the exact device, or use a more specific name.
+          Use usb_serial or usb_addr (BBB:DDD) to specify the exact device.
       when:
+        - requested_usb_serial == ''
         - requested_usb_name != ''
         - "'match_count=0' not in name_match_result.stdout"
         - "'match_count=1' not in name_match_result.stdout"
@@ -104,19 +112,21 @@
           No device matching name '{{ requested_usb_name }}' found for {{ requested_usb_id }}.
           Check device name with: lsusb -d {{ requested_usb_id }}
       when:
+        - requested_usb_serial == ''
         - requested_usb_name != ''
         - "'match_count=0' in name_match_result.stdout"
 
-    - name: Set USB serial for disambiguation
+    - name: Set USB serial from name match
       set_fact:
         usb_serial: "{{ name_match_result.stdout | regex_search('device_serial=(\\S+)', '\\1') | first }}"
       when:
+        - requested_usb_serial == ''
         - requested_usb_name != ''
         - name_match_result is defined
         - "'device_serial=' in name_match_result.stdout"
         - "name_match_result.stdout | regex_search('device_serial=(\\S+)') is not none"
 
-    - name: Default USB serial when no name matching
+    - name: Default USB serial when no name or serial provided
       set_fact:
         usb_serial: ""
       when: usb_serial is not defined

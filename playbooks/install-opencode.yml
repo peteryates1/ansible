@@ -1,15 +1,14 @@
 ---
-# Install OpenCode in a VM.
-# By default creates a dedicated opencode user with SSH keypair.
-# Specify opencode_user to install for an existing user instead.
+# Install OpenCode in a VM for an existing user.
+# The target user must already exist (use create-vm-user.yml first).
 #
 # Usage:
 #   ansible-playbook playbooks/install-opencode.yml -e vm_name=jop01
-#   ansible-playbook playbooks/install-opencode.yml -e vm_name=jop01 -e opencode_user=peter
+#   ansible-playbook playbooks/install-opencode.yml -e vm_name=jop01 -e install_user=peter
 #
 # Optional overrides:
-#   -e vm_user=peter            (SSH login user)
-#   -e opencode_user=opencode   (install target; default creates dedicated user)
+#   -e vm_user=peter                (SSH login user)
+#   -e install_user=opencode        (install target; default: opencode)
 
 - name: Prepare VM SSH target
   hosts: localhost
@@ -18,10 +17,8 @@
   vars:
     requested_vm_name: "{{ vm_name | default('') }}"
     requested_vm_user: "{{ vm_user | default('peter') }}"
-    requested_opencode_user: "{{ opencode_user | default('opencode') }}"
-    requested_create_user: "{{ create_user | default(true) | bool }}"
+    requested_install_user: "{{ install_user | default('opencode') }}"
     requested_host_ssh_user: "{{ host_ssh_user | default(lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true)) }}"
-    requested_ssh_authorized_keys_file: "{{ ssh_authorized_keys_file | default('/home/' ~ requested_host_ssh_user ~ '/.ssh/authorized_keys') }}"
 
   tasks:
     - name: Validate vm_name
@@ -171,12 +168,6 @@
       register: resolved_identity_args
       changed_when: false
 
-    - name: Load SSH authorized keys from host
-      set_fact:
-        host_ssh_authorized_keys: "{{ lookup('file', requested_ssh_authorized_keys_file).split('\n') | select | list }}"
-      when: requested_create_user
-      no_log: true
-
     - name: Add dynamic SSH target host
       add_host:
         name: opencode_target
@@ -189,9 +180,7 @@
             if (resolved_identity_args.stdout | trim) != ''
             else ''
           }}-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-        target_opencode_user: "{{ requested_opencode_user }}"
-        target_create_user: "{{ requested_create_user }}"
-        target_ssh_authorized_keys: "{{ host_ssh_authorized_keys | default([]) }}"
+        target_install_user: "{{ requested_install_user }}"
 
 - name: Install OpenCode in VM
   hosts: opencode_targets
@@ -203,54 +192,10 @@
       wait_for_connection:
         timeout: 300
 
-    - name: Ensure opencode user exists
-      user:
-        name: "{{ target_opencode_user }}"
-        shell: /bin/bash
-        groups: sudo,dialout,plugdev
-        append: true
-        create_home: true
-      when: target_create_user | bool
-
-    - name: Allow opencode user passwordless sudo
-      copy:
-        dest: "/etc/sudoers.d/{{ target_opencode_user }}"
-        content: "{{ target_opencode_user }} ALL=(ALL) NOPASSWD:ALL\n"
-        mode: '0440'
-        validate: 'visudo -cf %s'
-      when: target_create_user | bool
-
-    - name: Set up SSH authorized keys for opencode user
-      authorized_key:
-        user: "{{ target_opencode_user }}"
-        key: "{{ item }}"
-        state: present
-      loop: "{{ target_ssh_authorized_keys }}"
-      when: target_create_user | bool
-
-    - name: Generate SSH keypair for opencode user
-      shell: |
-        set -euo pipefail
-        sudo -u {{ target_opencode_user }} bash << 'KEYSCRIPT'
-        mkdir -p ~/.ssh
-        chmod 700 ~/.ssh
-        if [ ! -f ~/.ssh/id_ed25519 ]; then
-          ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -C "{{ target_opencode_user }}@$(hostname)"
-          echo "generated"
-        else
-          echo "exists"
-        fi
-        KEYSCRIPT
-      args:
-        executable: /bin/bash
-      register: keygen_result
-      changed_when: "'generated' in keygen_result.stdout"
-      when: target_create_user | bool
-
     - name: Install OpenCode
       shell: |
         set -euo pipefail
-        sudo -u {{ target_opencode_user }} bash << 'SCRIPT'
+        sudo -u {{ target_install_user }} bash << 'SCRIPT'
         set -e
         cd ~
         curl -fsSL https://opencode.ai/install | bash
@@ -264,6 +209,4 @@
 
     - name: Display summary
       debug:
-        msg: |
-          OpenCode installed for user: {{ target_opencode_user }}
-          SSH keypair: ~{{ target_opencode_user }}/.ssh/id_ed25519
+        msg: "OpenCode installed for user: {{ target_install_user }}"

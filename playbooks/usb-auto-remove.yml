@@ -5,6 +5,7 @@
 # Usage:
 #   ansible-playbook playbooks/usb-auto-remove.yml -e vm_name=pico -e usb_id=2e8a:0005
 #   ansible-playbook playbooks/usb-auto-remove.yml -e vm_name=jop-claude -e usb_id=09fb:6001
+#   ansible-playbook playbooks/usb-auto-remove.yml -e vm_name=pico1 -e usb_id=2e8a:000a -e usb_serial=E661234
 
 - name: Remove USB auto-passthrough
   hosts: localhost
@@ -13,6 +14,7 @@
   vars:
     requested_vm_name: "{{ vm_name | default('') }}"
     requested_usb_id: "{{ usb_id | default('') }}"
+    requested_usb_serial: "{{ usb_serial | default('') }}"
     udev_rules_dir: /etc/udev/rules.d
 
   tasks:
@@ -37,7 +39,7 @@
     - name: Find matching udev rules
       find:
         paths: "{{ udev_rules_dir }}"
-        patterns: "90-vm-usb-{{ requested_vm_name }}-{{ usb_vendor }}{{ usb_product }}*.rules"
+        patterns: "90-vm-usb-{{ requested_vm_name }}-{{ usb_vendor }}{{ usb_product }}{{ '-' + requested_usb_serial if requested_usb_serial else '*' }}.rules"
       register: matching_rules
 
     - name: Remove udev rules
@@ -58,6 +60,7 @@
         vm="{{ requested_vm_name }}"
         vendor="{{ usb_vendor }}"
         product="{{ usb_product }}"
+        serial="{{ requested_usb_serial | default('') }}"
 
         state=$(virsh domstate "$vm" 2>/dev/null || true)
         if [ "$state" != "running" ]; then
@@ -65,15 +68,39 @@
           exit 0
         fi
 
-        if ! virsh dumpxml "$vm" 2>/dev/null | grep -q "0x${vendor}"; then
-          echo "not_attached"
-          exit 0
-        fi
-
         xml=$(mktemp /tmp/usb-passthrough-XXXXXX.xml)
         trap 'rm -f "$xml"' EXIT
 
-        cat > "$xml" <<XMLEOF
+        if [ -n "$serial" ]; then
+          # Serial-addressed devices use bus:device XML — find via sysfs
+          bus=""
+          dev=""
+          for d in /sys/bus/usb/devices/[0-9]*; do
+            [ -f "$d/idVendor" ] || continue
+            [ "$(cat "$d/idVendor")" = "$vendor" ] || continue
+            [ "$(cat "$d/idProduct")" = "$product" ] || continue
+            [ "$(cat "$d/serial" 2>/dev/null)" = "$serial" ] || continue
+            bus=$(cat "$d/busnum")
+            dev=$(cat "$d/devnum")
+            break
+          done
+          if [ -z "$bus" ]; then
+            echo "device_not_present"
+            exit 0
+          fi
+          cat > "$xml" <<XMLEOF
+        <hostdev mode='subsystem' type='usb' managed='yes'>
+          <source>
+            <address bus='${bus}' device='${dev}'/>
+          </source>
+        </hostdev>
+        XMLEOF
+        else
+          if ! virsh dumpxml "$vm" 2>/dev/null | grep -q "0x${vendor}"; then
+            echo "not_attached"
+            exit 0
+          fi
+          cat > "$xml" <<XMLEOF
         <hostdev mode='subsystem' type='usb' managed='yes'>
           <source>
             <vendor id='0x${vendor}'/>
@@ -81,6 +108,7 @@
           </source>
         </hostdev>
         XMLEOF
+        fi
 
         virsh detach-device "$vm" "$xml" --live 2>/dev/null && echo "detached" || echo "not_attached"
       args:

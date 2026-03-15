@@ -1,14 +1,11 @@
 ---
-# Install Claude Code in a VM for an existing user.
-# The target user must already exist (use create-vm-user.yml first).
+# Create a user on a VM with SSH keys and passwordless sudo.
 #
 # Usage:
-#   ansible-playbook playbooks/install-claude.yml -e vm_name=jop01
-#   ansible-playbook playbooks/install-claude.yml -e vm_name=jop01 -e install_user=peter
+#   ansible-playbook playbooks/create-vm-user.yml -e vm_name=jop01 -e target_user=claude
 #
 # Optional overrides:
-#   -e vm_user=peter            (SSH login user)
-#   -e install_user=claude      (install target; default: claude)
+#   -e vm_user=peter        (SSH login user)
 
 - name: Prepare VM SSH target
   hosts: localhost
@@ -17,14 +14,20 @@
   vars:
     requested_vm_name: "{{ vm_name | default('') }}"
     requested_vm_user: "{{ vm_user | default('peter') }}"
-    requested_install_user: "{{ install_user | default('claude') }}"
+    requested_target_user: "{{ target_user | default('') }}"
     requested_host_ssh_user: "{{ host_ssh_user | default(lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true)) }}"
+    requested_ssh_authorized_keys_file: "{{ ssh_authorized_keys_file | default('/home/' ~ requested_host_ssh_user ~ '/.ssh/authorized_keys') }}"
 
   tasks:
     - name: Validate vm_name
       fail:
-        msg: "Usage: ansible-playbook playbooks/install-claude.yml -e vm_name=<name> [-e vm_user=<user>]"
+        msg: "Usage: ansible-playbook playbooks/create-vm-user.yml -e vm_name=<name> -e target_user=<user>"
       when: requested_vm_name == ''
+
+    - name: Validate target_user
+      fail:
+        msg: "target_user is required. Usage: -e target_user=<user>"
+      when: requested_target_user == ''
 
     - name: Check VM existence
       command: virsh list --all --name
@@ -168,10 +171,15 @@
       register: resolved_identity_args
       changed_when: false
 
+    - name: Load SSH authorized keys from host
+      set_fact:
+        host_ssh_authorized_keys: "{{ lookup('file', requested_ssh_authorized_keys_file).split('\n') | select | list }}"
+      no_log: true
+
     - name: Add dynamic SSH target host
       add_host:
-        name: claude_target
-        groups: claude_targets
+        name: user_target
+        groups: user_targets
         ansible_host: "{{ vm_ip.stdout }}"
         ansible_user: "{{ requested_vm_user }}"
         ansible_ssh_common_args: >-
@@ -180,10 +188,11 @@
             if (resolved_identity_args.stdout | trim) != ''
             else ''
           }}-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-        target_install_user: "{{ requested_install_user }}"
+        target_user: "{{ requested_target_user }}"
+        target_ssh_authorized_keys: "{{ host_ssh_authorized_keys }}"
 
-- name: Install Claude Code in VM
-  hosts: claude_targets
+- name: Create user in VM
+  hosts: user_targets
   become: true
   gather_facts: false
 
@@ -192,21 +201,48 @@
       wait_for_connection:
         timeout: 300
 
-    - name: Install Claude Code
+    - name: Ensure user exists
+      user:
+        name: "{{ target_user }}"
+        shell: /bin/bash
+        groups: sudo,dialout,plugdev
+        append: true
+        create_home: true
+
+    - name: Allow user passwordless sudo
+      copy:
+        dest: "/etc/sudoers.d/{{ target_user }}"
+        content: "{{ target_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Set up SSH authorized keys for user
+      authorized_key:
+        user: "{{ target_user }}"
+        key: "{{ item }}"
+        state: present
+      loop: "{{ target_ssh_authorized_keys }}"
+
+    - name: Generate SSH keypair for user
       shell: |
         set -euo pipefail
-        sudo -u {{ target_install_user }} bash << 'SCRIPT'
-        set -e
-        cd ~
-        curl -fsSL https://claude.ai/install.sh | bash
-        if ! grep -q '.local/bin' ~/.bashrc 2>/dev/null; then
-          echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+        sudo -u {{ target_user }} bash << 'KEYSCRIPT'
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        if [ ! -f ~/.ssh/id_ed25519 ]; then
+          ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -C "{{ target_user }}@$(hostname)"
+          echo "generated"
+        else
+          echo "exists"
         fi
-        SCRIPT
+        KEYSCRIPT
       args:
         executable: /bin/bash
-      register: claude_install
+      register: keygen_result
+      changed_when: "'generated' in keygen_result.stdout"
 
     - name: Display summary
       debug:
-        msg: "Claude Code installed for user: {{ target_install_user }}"
+        msg: |
+          User created: {{ target_user }}
+          SSH keypair: ~{{ target_user }}/.ssh/id_ed25519

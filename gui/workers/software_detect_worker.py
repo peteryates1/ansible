@@ -18,6 +18,8 @@ class SoftwareDetectWorker(BaseWorker):
         # Build a compound command: each detect_cmd prints key=yes or key=no
         parts = []
         for entry in SOFTWARE_REGISTRY:
+            if entry.get('detect_cmd') is None:
+                continue
             key = entry['key']
             cmd = entry['detect_cmd']
             parts.append(f'({cmd}) >/dev/null 2>&1 && echo {key}=yes || echo {key}=no')

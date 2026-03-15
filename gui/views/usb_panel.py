@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QTableView, QHeaderView, QPushButton,
     QLabel, QMessageBox, QAbstractItemView,
+    QInputDialog,
 )
 
 from gui.models.usb_model import USBTableModel
@@ -61,6 +62,10 @@ class USBPanel(QWidget):
         self._remove_btn.clicked.connect(self._on_remove)
         btn_layout.addWidget(self._remove_btn)
 
+        self._remove_all_btn = QPushButton("Remove All from VM")
+        self._remove_all_btn.clicked.connect(self._on_remove_all)
+        btn_layout.addWidget(self._remove_all_btn)
+
         btn_layout.addStretch()
 
         self._refresh_btn = QPushButton("Refresh")
@@ -95,10 +100,13 @@ class USBPanel(QWidget):
         self._reassign_btn.setEnabled(any_assigned)
         self._remove_btn.setEnabled(any_assigned)
 
-    def _usb_name_for(self, dev):
+    def _usb_disambig_for(self, dev):
+        """Return (usb_name, usb_serial) for disambiguation."""
+        if dev.serial:
+            return None, dev.serial
         if dev.has_duplicate_id and dev.display_name != 'USB Device':
-            return dev.display_name
-        return None
+            return dev.display_name, None
+        return None, None
 
     def _run_op(self, title, worker):
         dialog = OperationDialog(title, worker, self)
@@ -140,20 +148,27 @@ class USBPanel(QWidget):
             if dev.assignment_mode == 'auto':
                 self._run_op(
                     f"Removing auto rule for {dev.usb_id}",
-                    PlaybookService.run_usb_auto_remove(dev.assigned_vm, dev.usb_id)
+                    PlaybookService.run_usb_auto_remove(
+                        dev.assigned_vm, dev.usb_id,
+                        usb_serial=dev.serial or None
+                    )
                 )
 
             # 3. Assign to new VM
-            name = self._usb_name_for(dev)
+            name, serial = self._usb_disambig_for(dev)
             if is_auto:
                 self._run_op(
                     f"Auto-passthrough {dev.usb_id} to {new_vm}",
-                    PlaybookService.run_usb_auto(new_vm, dev.usb_id, name)
+                    PlaybookService.run_usb_auto(
+                        new_vm, dev.usb_id, usb_name=name, usb_serial=serial
+                    )
                 )
             else:
                 self._run_op(
                     f"Attaching {dev.usb_id} to {new_vm}",
-                    PlaybookService.run_usb_attach(new_vm, dev.usb_id, name)
+                    PlaybookService.run_usb_attach(
+                        new_vm, dev.usb_id, usb_name=name, usb_serial=serial
+                    )
                 )
 
         self.refresh()
@@ -179,9 +194,47 @@ class USBPanel(QWidget):
             if dev.assignment_mode == 'auto':
                 self._run_op(
                     f"Removing auto rule for {dev.usb_id}",
-                    PlaybookService.run_usb_auto_remove(dev.assigned_vm, dev.usb_id)
+                    PlaybookService.run_usb_auto_remove(
+                        dev.assigned_vm, dev.usb_id,
+                        usb_serial=dev.serial or None
+                    )
                 )
 
+        self.refresh()
+
+    @Slot()
+    def _on_remove_all(self):
+        try:
+            vm_names = [v['name'] for v in self._libvirt.list_vms()]
+        except Exception:
+            vm_names = []
+        if not vm_names:
+            QMessageBox.information(self, "Remove All", "No VMs found.")
+            return
+
+        choices = ["All VMs"] + vm_names
+        choice, ok = QInputDialog.getItem(
+            self, "Remove All USB", "Remove all USB assignments from:",
+            choices, 0, False
+        )
+        if not ok:
+            return
+
+        vm_name = None if choice == "All VMs" else choice
+        target = choice
+        reply = QMessageBox.question(
+            self, "Remove All USB",
+            f"Remove all USB rules, detach all USB devices, and strip "
+            f"persistent USB config from {target}?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._run_op(
+            f"Removing all USB from {target}",
+            PlaybookService.run_usb_detach_all(vm_name)
+        )
         self.refresh()
 
     def _detach_device(self, dev):
@@ -216,15 +269,19 @@ class USBPanel(QWidget):
 
         vm_name = dialog.selected_vm
         for dev in devices:
-            name = self._usb_name_for(dev)
+            name, serial = self._usb_disambig_for(dev)
             if dialog.is_auto:
                 self._run_op(
                     f"Auto-passthrough {dev.usb_id} to {vm_name}",
-                    PlaybookService.run_usb_auto(vm_name, dev.usb_id, name)
+                    PlaybookService.run_usb_auto(
+                        vm_name, dev.usb_id, usb_name=name, usb_serial=serial
+                    )
                 )
             else:
                 self._run_op(
                     f"Attaching {dev.usb_id} to {vm_name}",
-                    PlaybookService.run_usb_attach(vm_name, dev.usb_id, name)
+                    PlaybookService.run_usb_attach(
+                        vm_name, dev.usb_id, usb_name=name, usb_serial=serial
+                    )
                 )
         self.refresh()

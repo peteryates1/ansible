@@ -3,14 +3,15 @@
 # Usage:
 #   ansible-playbook playbooks/usb-attach.yml \
 #     -e vm_name=claude01 -e usb_id=09fb:6001
+# Disambiguate duplicate IDs by serial:
+#   ansible-playbook playbooks/usb-attach.yml \
+#     -e vm_name=pico1 -e usb_id=2e8a:000a -e usb_serial=E661234
 # Disambiguate duplicate IDs by name:
 #   ansible-playbook playbooks/usb-attach.yml \
 #     -e vm_name=claude01 -e usb_id=0403:6010 -e usb_name="Arrow USB Blaster TEI0050"
-# Disambiguate duplicate IDs:
+# Disambiguate by bus:device address:
 #   ansible-playbook playbooks/usb-attach.yml \
 #     -e vm_name=claude01 -e usb_id=0403:6010 -e usb_addr=001:011
-# Optional:
-#   -e usb_name="Altera Blaster"
 
 - name: Attach USB Device to VM
   hosts: localhost
@@ -21,6 +22,7 @@
     requested_usb_id: "{{ usb_id | default('') | lower }}"
     requested_usb_addr: "{{ usb_addr | default('') }}"
     requested_usb_name: "{{ usb_name | default('') }}"
+    requested_usb_serial: "{{ usb_serial | default('') }}"
     usb_lock_dir: /var/lock/vm-usb
 
   tasks:
@@ -55,12 +57,42 @@
         msg: "No host USB device found for {{ requested_usb_id }}. Check `lsusb` and retry."
       when: lsusb_match.stdout_lines | length == 0
 
+    - name: Select USB by serial from sysfs
+      shell: |
+        set -euo pipefail
+        vendor="{{ requested_usb_id.split(':')[0] }}"
+        product="{{ requested_usb_id.split(':')[1] }}"
+        serial="{{ requested_usb_serial }}"
+        for d in /sys/bus/usb/devices/[0-9]*; do
+          [ -f "$d/idVendor" ] || continue
+          [ "$(cat "$d/idVendor")" = "$vendor" ] || continue
+          [ "$(cat "$d/idProduct")" = "$product" ] || continue
+          [ "$(cat "$d/serial" 2>/dev/null)" = "$serial" ] || continue
+          bus=$(cat "$d/busnum")
+          dev=$(cat "$d/devnum")
+          bus_pad=$(printf '%03d' "$bus")
+          dev_pad=$(printf '%03d' "$dev")
+          echo "Bus ${bus_pad} Device ${dev_pad}: ID ${vendor}:${product}"
+          exit 0
+        done
+        echo "NOT_FOUND"
+      args:
+        executable: /bin/bash
+      register: serial_match_result
+      changed_when: false
+      when: requested_usb_serial != ''
+
+    - name: Fail when serial does not match any device
+      fail:
+        msg: "No device with serial '{{ requested_usb_serial }}' found for {{ requested_usb_id }}."
+      when: requested_usb_serial != '' and 'NOT_FOUND' in serial_match_result.stdout
+
     - name: Select USB by explicit bus:device
       command: lsusb -s {{ requested_usb_addr | quote }} -d {{ requested_usb_id | quote }}
       register: lsusb_selected
       changed_when: false
       failed_when: false
-      when: requested_usb_addr != ''
+      when: requested_usb_serial == '' and requested_usb_addr != ''
 
     - name: Select USB by name from descriptors
       shell: |
@@ -81,32 +113,33 @@
         executable: /bin/bash
       register: lsusb_named
       changed_when: false
-      when: requested_usb_addr == '' and (requested_usb_name | trim) != ''
+      when: requested_usb_serial == '' and requested_usb_addr == '' and (requested_usb_name | trim) != ''
 
     - name: Fail when specified usb_addr does not match usb_id
       fail:
         msg: "No device for usb_id={{ requested_usb_id }} at usb_addr={{ requested_usb_addr }}. Check `lsusb` output."
-      when: requested_usb_addr != '' and lsusb_selected.stdout_lines | length == 0
+      when: requested_usb_serial == '' and requested_usb_addr != '' and lsusb_selected.stdout_lines | length == 0
 
     - name: Fail when usb_name does not match any device
       fail:
         msg: "No device for usb_id={{ requested_usb_id }} matched usb_name='{{ requested_usb_name }}'. Check `lsusb` output."
-      when: requested_usb_addr == '' and (requested_usb_name | trim) != '' and lsusb_named.stdout_lines | length == 0
+      when: requested_usb_serial == '' and requested_usb_addr == '' and (requested_usb_name | trim) != '' and lsusb_named.stdout_lines | length == 0
 
     - name: Fail when usb_name matches multiple devices
       fail:
-        msg: "usb_name='{{ requested_usb_name }}' matched multiple devices for {{ requested_usb_id }}. Use usb_addr=BBB:DDD to disambiguate."
-      when: requested_usb_addr == '' and (requested_usb_name | trim) != '' and lsusb_named.stdout_lines | length > 1
+        msg: "usb_name='{{ requested_usb_name }}' matched multiple devices for {{ requested_usb_id }}. Use usb_serial or usb_addr=BBB:DDD to disambiguate."
+      when: requested_usb_serial == '' and requested_usb_addr == '' and (requested_usb_name | trim) != '' and lsusb_named.stdout_lines | length > 1
 
-    - name: Fail when USB ID is ambiguous without usb_addr or usb_name
+    - name: Fail when USB ID is ambiguous without disambiguation
       fail:
-        msg: "Multiple devices match {{ requested_usb_id }}. Pass usb_name='...'(recommended) or usb_addr=BBB:DDD from lsusb."
-      when: requested_usb_addr == '' and (requested_usb_name | trim) == '' and lsusb_match.stdout_lines | length > 1
+        msg: "Multiple devices match {{ requested_usb_id }}. Pass usb_serial=<serial> (recommended), usb_name='...' or usb_addr=BBB:DDD."
+      when: requested_usb_serial == '' and requested_usb_addr == '' and (requested_usb_name | trim) == '' and lsusb_match.stdout_lines | length > 1
 
     - name: Select effective USB line
       set_fact:
         selected_lsusb_line: >-
           {{
+            (serial_match_result.stdout_lines[0]) if requested_usb_serial != '' else
             (lsusb_selected.stdout_lines[0]) if requested_usb_addr != '' else
             (
               (lsusb_named.stdout_lines[0]) if ((requested_usb_name | trim) != '') else

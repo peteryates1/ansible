@@ -35,9 +35,10 @@
 #   ./vm install-blaster jop [user]     # Install Arrow USB Blaster support in VM
 #   ./vm install-alchitry jop [user]   # Install Alchitry AU udev rules in VM
 #   ./vm install-spinalhdl fpga01 [user]  # Install Java/Scala/sbt toolchain in VM
-#   ./vm install-claude jop01             # Install Claude Code (creates claude user)
+#   ./vm create-vm-user jop01 claude      # Create user on VM with SSH keys
+#   ./vm install-claude jop01             # Install Claude Code for claude user
 #   ./vm install-claude jop01 peter      # Install Claude Code for existing user
-#   ./vm install-opencode jop01          # Install OpenCode (creates opencode user)
+#   ./vm install-opencode jop01          # Install OpenCode for opencode user
 #   ./vm install-opencode jop01 peter    # Install OpenCode for existing user
 #   ./vm install-gh jop01                # Install GitHub CLI (gh)
 #   ./vm install-vscode jop01            # Install Visual Studio Code
@@ -433,33 +434,40 @@ case "$ACTION" in
         ;;
     usb-attach)
         if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
-            echo "Usage: $0 usb-attach <vm_name> <usb_id> [usb_addr] [usb_name]"
+            echo "Usage: $0 usb-attach <vm_name> <usb_id> [--serial <serial>] [usb_addr] [usb_name]"
             echo "usb_id format: vvvv:pppp (copy from lsusb)"
-            echo "For duplicate IDs, prefer usb_name; use usb_addr (BBB:DDD) when needed."
+            echo "For duplicate IDs, prefer --serial; use usb_name or usb_addr (BBB:DDD) otherwise."
             echo "Examples:"
+            echo "  $0 usb-attach pico1 2e8a:000a --serial E661234"
             echo "  $0 usb-attach claude01 09fb:6001 \"Altera Blaster\""
             echo "  $0 usb-attach jop 0403:6010 \"Arrow USB Blaster TEI0050\""
             echo "  $0 usb-attach fpga01 0403:6010 001:011 \"Arrow Blaster\""
             exit 1
         fi
         USB_ADDR=""
-        if [[ "$ARG4" =~ ^[0-9]{1,3}:[0-9]{1,3}$ ]]; then
-            USB_ADDR="$ARG4"
-            USB_NAME="${*:5}"
+        USB_SERIAL=""
+        if [ "$ARG4" = "--serial" ]; then
+            USB_SERIAL="$5"
+            run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_serial=$USB_SERIAL"
         else
-            USB_NAME="${*:4}"
-        fi
-        if [ -n "$USB_NAME" ]; then
-            if [ -n "$USB_ADDR" ]; then
-                run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR" -e "usb_name='$USB_NAME'"
+            if [[ "$ARG4" =~ ^[0-9]{1,3}:[0-9]{1,3}$ ]]; then
+                USB_ADDR="$ARG4"
+                USB_NAME="${*:5}"
             else
-                run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_name='$USB_NAME'"
+                USB_NAME="${*:4}"
             fi
-        else
-            if [ -n "$USB_ADDR" ]; then
-                run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR"
+            if [ -n "$USB_NAME" ]; then
+                if [ -n "$USB_ADDR" ]; then
+                    run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR" -e "usb_name='$USB_NAME'"
+                else
+                    run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_name='$USB_NAME'"
+                fi
             else
-                run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+                if [ -n "$USB_ADDR" ]; then
+                    run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_addr=$USB_ADDR"
+                else
+                    run_playbook usb-attach -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+                fi
             fi
         fi
         ;;
@@ -543,35 +551,45 @@ case "$ACTION" in
         ;;
     usb-auto)
         if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
-            echo "Usage: $0 usb-auto <vm_name> <usb_id> [usb_name]"
+            echo "Usage: $0 usb-auto <vm_name> <usb_id> [--serial <serial>] [usb_name]"
             echo "Sets up automatic USB passthrough (udev rule) so the device"
             echo "auto-attaches to the VM when plugged in."
             echo ""
             echo "Examples:"
-            echo "  $0 usb-auto pico 2e8a:000a"
+            echo "  $0 usb-auto pico1 2e8a:000a --serial E661234"
             echo "  $0 usb-auto pico 2e8a:0003              # RP2 Boot mode"
             echo "  $0 usb-auto jop-claude 09fb:6001 \"Altera Blaster\""
             echo "  $0 usb-auto jop-claude 0403:6010 \"Arrow USB Blaster\""
             exit 1
         fi
-        USB_NAME="${*:4}"
-        if [ -n "$USB_NAME" ]; then
-            run_playbook usb-auto -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_name='$USB_NAME'"
+        if [ "$ARG4" = "--serial" ]; then
+            run_playbook usb-auto -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_serial=$5"
         else
-            run_playbook usb-auto -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+            USB_NAME="${*:4}"
+            if [ -n "$USB_NAME" ]; then
+                run_playbook usb-auto -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_name='$USB_NAME'"
+            else
+                run_playbook usb-auto -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+            fi
         fi
         ;;
     usb-auto-remove)
         if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
-            echo "Usage: $0 usb-auto-remove <vm_name> <usb_id>"
+            echo "Usage: $0 usb-auto-remove <vm_name> <usb_id> [--serial <serial>]"
             echo "Removes automatic USB passthrough for a device."
+            echo "Without --serial, removes all rules for that vendor:product on this VM."
             echo ""
             echo "Examples:"
+            echo "  $0 usb-auto-remove pico1 2e8a:000a --serial E661234"
             echo "  $0 usb-auto-remove pico 2e8a:000a"
             echo "  $0 usb-auto-remove jop-claude 09fb:6001"
             exit 1
         fi
-        run_playbook usb-auto-remove -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+        if [ "$ARG4" = "--serial" ]; then
+            run_playbook usb-auto-remove -e "vm_name=$VM_NAME" -e "usb_id=$ARG3" -e "usb_serial=$5"
+        else
+            run_playbook usb-auto-remove -e "vm_name=$VM_NAME" -e "usb_id=$ARG3"
+        fi
         ;;
     usb-auto-list)
         echo "Active USB auto-passthrough rules:"
@@ -746,15 +764,22 @@ case "$ACTION" in
         INSTALL_USER="${ARG3:-peter}"
         run_playbook install-spinalhdl -e "vm_name=$VM_NAME" -e "vm_user=$INSTALL_USER"
         ;;
+    create-vm-user)
+        if [ -z "$VM_NAME" ] || [ -z "$ARG3" ]; then
+            echo "Usage: $0 create-vm-user <vm_name> <user>"
+            echo "Creates a user on the VM with SSH keys and passwordless sudo."
+            exit 1
+        fi
+        run_playbook create-vm-user -e "vm_name=$VM_NAME" -e "target_user=$ARG3"
+        ;;
     install-claude)
         if [ -z "$VM_NAME" ]; then
             echo "Usage: $0 install-claude <vm_name> [user]"
-            echo "Installs Claude Code. Default: creates dedicated claude user."
-            echo "Specify user to install for an existing user instead."
+            echo "Installs Claude Code for an existing user (default: claude)."
             exit 1
         fi
         if [ -n "$ARG3" ]; then
-            run_playbook install-claude -e "vm_name=$VM_NAME" -e "claude_user=$ARG3" -e "create_user=false"
+            run_playbook install-claude -e "vm_name=$VM_NAME" -e "install_user=$ARG3"
         else
             run_playbook install-claude -e "vm_name=$VM_NAME"
         fi
@@ -762,12 +787,11 @@ case "$ACTION" in
     install-opencode)
         if [ -z "$VM_NAME" ]; then
             echo "Usage: $0 install-opencode <vm_name> [user]"
-            echo "Installs OpenCode. Default: creates dedicated opencode user."
-            echo "Specify user to install for an existing user instead."
+            echo "Installs OpenCode for an existing user (default: opencode)."
             exit 1
         fi
         if [ -n "$ARG3" ]; then
-            run_playbook install-opencode -e "vm_name=$VM_NAME" -e "opencode_user=$ARG3" -e "create_user=false"
+            run_playbook install-opencode -e "vm_name=$VM_NAME" -e "install_user=$ARG3"
         else
             run_playbook install-opencode -e "vm_name=$VM_NAME"
         fi
@@ -1031,8 +1055,9 @@ case "$ACTION" in
         echo "  install-blaster <name> [user]  Install Arrow USB Blaster support in VM"
         echo "  install-alchitry <name> [user] Install Alchitry AU udev rules in VM"
         echo "  install-spinalhdl <name> [user]  Install Java/Scala/sbt toolchain in VM"
-        echo "  install-claude <name> [user]   Install Claude Code (default: creates claude user)"
-        echo "  install-opencode <name> [user] Install OpenCode (default: creates opencode user)"
+        echo "  create-vm-user <name> <user>   Create user on VM with SSH keys and sudo"
+        echo "  install-claude <name> [user]   Install Claude Code (default user: claude)"
+        echo "  install-opencode <name> [user] Install OpenCode (default user: opencode)"
         echo "  install-gh <name>              Install GitHub CLI (gh)"
         echo "  install-vscode <name>         Install Visual Studio Code"
         echo "  install-codium <name>          Install VSCodium"
@@ -1073,15 +1098,15 @@ case "$ACTION" in
         echo "  $0 copy-key claude01 git01    # Allow claude@claude01 to access git@git01"
         echo "  $0 usb-list"
         echo "  $0 usb-serials"
+        echo "  $0 usb-attach pico1 2e8a:000a --serial E661234"
         echo "  $0 usb-attach claude01 09fb:6001 \"Altera Blaster\""
         echo "  $0 usb-attach jop 0403:6010 \"Arrow USB Blaster TEI0050\""
-        echo "  $0 usb-attach fpga01 0403:6010 001:011 \"Arrow Blaster\""
         echo "  $0 usb-detach 09fb:6001 \"Altera Blaster\""
         echo "  $0 usb-detach fpga01 0403:6010 \"Arrow USB Blaster TEI0050\""
         echo "  $0 usb-detach-all pico"
-        echo "  $0 usb-auto pico 2e8a:000a"
+        echo "  $0 usb-auto pico1 2e8a:000a --serial E661234"
         echo "  $0 usb-auto jop-claude 09fb:6001 \"Altera Blaster\""
-        echo "  $0 usb-auto-remove pico 2e8a:000a"
+        echo "  $0 usb-auto-remove pico1 2e8a:000a --serial E661234"
         echo "  $0 usb-auto-list"
         echo "  $0 install-gh jop01"
         echo "  $0 install-blaster jop"

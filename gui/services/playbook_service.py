@@ -17,31 +17,45 @@ class PlaybookService:
         return PlaybookWorker('share-dir', extra_vars)
 
     @staticmethod
-    def run_usb_auto(vm_name, usb_id, usb_name=None):
+    def run_usb_auto(vm_name, usb_id, usb_name=None, usb_serial=None):
         extra_vars = {
             'vm_name': vm_name,
             'usb_id': usb_id,
         }
-        if usb_name:
+        if usb_serial:
+            extra_vars['usb_serial'] = usb_serial
+        elif usb_name:
             extra_vars['usb_name'] = usb_name
         return PlaybookWorker('usb-auto', extra_vars)
 
     @staticmethod
-    def run_usb_auto_remove(vm_name, usb_id):
-        return PlaybookWorker('usb-auto-remove', {
-            'vm_name': vm_name,
-            'usb_id': usb_id,
-        })
-
-    @staticmethod
-    def run_usb_attach(vm_name, usb_id, usb_name=None):
+    def run_usb_auto_remove(vm_name, usb_id, usb_serial=None):
         extra_vars = {
             'vm_name': vm_name,
             'usb_id': usb_id,
         }
-        if usb_name:
+        if usb_serial:
+            extra_vars['usb_serial'] = usb_serial
+        return PlaybookWorker('usb-auto-remove', extra_vars)
+
+    @staticmethod
+    def run_usb_attach(vm_name, usb_id, usb_name=None, usb_serial=None):
+        extra_vars = {
+            'vm_name': vm_name,
+            'usb_id': usb_id,
+        }
+        if usb_serial:
+            extra_vars['usb_serial'] = usb_serial
+        elif usb_name:
             extra_vars['usb_name'] = usb_name
         return PlaybookWorker('usb-attach', extra_vars)
+
+    @staticmethod
+    def run_usb_detach_all(vm_name=None):
+        extra_vars = {}
+        if vm_name:
+            extra_vars['vm_name'] = vm_name
+        return PlaybookWorker('usb-detach-all', extra_vars)
 
     @staticmethod
     def run_usb_detach(usb_id, vm_name=None, usb_name=None):
@@ -60,16 +74,27 @@ class PlaybookService:
         })
 
     @staticmethod
-    def run_install(playbook_name, vm_name):
-        return PlaybookWorker(playbook_name, {
+    def run_install(playbook_name, vm_name, target_user=None):
+        extra_vars = {
             'vm_name': vm_name,
             'vm_user': VM_USER,
-        })
+        }
+        if target_user:
+            if playbook_name == 'create-vm-user':
+                extra_vars['target_user'] = target_user
+            else:
+                extra_vars['install_user'] = target_user
+        return PlaybookWorker(playbook_name, extra_vars)
 
     @staticmethod
-    def run_install_batch(playbook_name, vm_names):
-        tasks = [
-            (playbook_name, {'vm_name': name, 'vm_user': VM_USER})
-            for name in vm_names
-        ]
+    def run_install_batch(playbook_name, vm_names, target_user=None):
+        tasks = []
+        for name in vm_names:
+            extra_vars = {'vm_name': name, 'vm_user': VM_USER}
+            if target_user:
+                if playbook_name == 'create-vm-user':
+                    extra_vars['target_user'] = target_user
+                else:
+                    extra_vars['install_user'] = target_user
+            tasks.append((playbook_name, extra_vars))
         return ChainedPlaybookWorker(tasks)
